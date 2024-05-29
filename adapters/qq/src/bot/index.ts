@@ -106,6 +106,7 @@ export class QQBot<C extends Context = Context> extends Bot<C, QQBot.Config> {
   }
 
   async getLogin() {
+    await this.initialize()
     return this.toJSON()
   }
 

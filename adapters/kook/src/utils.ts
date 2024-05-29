@@ -15,7 +15,7 @@ export const adaptChannel = (data: Kook.Channel): Universal.Channel => ({
   type: data.is_category ? Universal.Channel.Type.CATEGORY
     : data.type === 1 ? Universal.Channel.Type.TEXT
       : data.type === 2 ? Universal.Channel.Type.VOICE
-        : Universal.Channel.Type.TEXT,
+        : -1 as Universal.Channel.Type, // not supported
   name: data.name,
   parentId: data.parent_id,
 })
