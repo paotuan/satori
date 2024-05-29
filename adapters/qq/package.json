@@ -1,5 +1,5 @@
 {
-  "name": "@satorijs/adapter-qq",
+  "name": "@paotuan/adapter-qq",
   "description": "QQ Adapter for Satorijs",
   "version": "4.7.0",
   "type": "module",
