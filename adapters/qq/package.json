@@ -3,8 +3,11 @@
   "description": "QQ Adapter for Satorijs",
   "version": "4.7.0",
   "type": "module",
-  "main": "lib/index.cjs",
+  "main": "lib/index.js",
   "typings": "lib/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
   "files": [
     "lib",
     "src"
@@ -30,7 +33,7 @@
     "im",
     "chat"
   ],
-  "peerDependencies": {
+  "dependencies": {
     "@satorijs/core": "^4.1.0"
   }
 }
