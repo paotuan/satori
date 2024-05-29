@@ -5,6 +5,7 @@ import { QQBot } from './bot'
 export const decodeGuild = (guild: QQ.Guild): Universal.Guild => ({
   id: guild.id,
   name: guild.name,
+  avatar: guild.icon,
 })
 
 export const decodeChannel = (channel: QQ.Channel): Universal.Channel => ({
