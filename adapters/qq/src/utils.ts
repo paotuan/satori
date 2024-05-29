@@ -10,8 +10,10 @@ export const decodeGuild = (guild: QQ.Guild): Universal.Guild => ({
 export const decodeChannel = (channel: QQ.Channel): Universal.Channel => ({
   id: channel.id,
   name: channel.name,
-  // TODO support more channel types
-  type: Universal.Channel.Type.TEXT,
+  type: channel.type === QQ.ChannelType.TEXT ? Universal.Channel.Type.TEXT
+    : channel.type === QQ.ChannelType.VOICE ? Universal.Channel.Type.VOICE
+      : channel.type === QQ.ChannelType.GROUP ? Universal.Channel.Type.GROUP
+        : Universal.Channel.Type.TEXT,
 })
 
 export const decodeUser = (user: QQ.User): Universal.User => ({
