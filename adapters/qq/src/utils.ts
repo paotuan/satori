@@ -13,7 +13,7 @@ export const decodeChannel = (channel: QQ.Channel): Universal.Channel => ({
   name: channel.name,
   type: channel.type === QQ.ChannelType.TEXT ? Universal.Channel.Type.TEXT
     : channel.type === QQ.ChannelType.VOICE ? Universal.Channel.Type.VOICE
-      : channel.type === QQ.ChannelType.GROUP ? Universal.Channel.Type.GROUP
+      : channel.type === QQ.ChannelType.GROUP ? Universal.Channel.Type.CATEGORY
         : channel.type === QQ.ChannelType.LIVE ? 10005 as Universal.Channel.Type
           : -1 as Universal.Channel.Type, // not supported
 })
