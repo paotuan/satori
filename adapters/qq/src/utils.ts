@@ -25,9 +25,10 @@ export const decodeUser = (user: QQ.User): Universal.User => ({
 })
 
 export const decodeGuildMember = (member: QQ.Member): Universal.GuildMember => ({
-  user: decodeUser(member.user),
+  user: member.user ? decodeUser(member.user) : undefined,
   nick: member.nick,
   roles: member.roles,
+  joinedAt: new Date(member.joined_at).getTime(),
 })
 
 export function decodeGroupMessage(
@@ -89,7 +90,8 @@ export async function decodeMessage(
 
   if (!payload) return message
   payload.timestamp = new Date(data.timestamp).valueOf()
-  payload.user = decodeUser(data.author)
+  payload.user = data.author ? decodeUser(data.author) : undefined
+  payload.member = data.member ? decodeGuildMember(data.member) : undefined
   if (data.direct_message) {
     // real guild id, dm's fake guild id
     payload.guild = { id: `${data.src_guild_id}_${data.guild_id}` }
