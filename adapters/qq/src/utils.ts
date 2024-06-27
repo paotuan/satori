@@ -15,6 +15,8 @@ export const decodeChannel = (channel: QQ.Channel): Universal.Channel => ({
     : channel.type === QQ.ChannelType.VOICE ? Universal.Channel.Type.VOICE
       : channel.type === QQ.ChannelType.GROUP ? Universal.Channel.Type.CATEGORY
         : Universal.Channel.Type.TEXT,
+  parentId: channel.parent_id,
+  position: channel.position,
 })
 
 export const decodeUser = (user: QQ.User): Universal.User => ({
