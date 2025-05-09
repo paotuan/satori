@@ -14,7 +14,7 @@ export abstract class MessageEncoder<C extends Context = Context, B extends Bot<
   public results: Message[] = []
   public session: C[typeof Context.session]
 
-  constructor(public bot: B, public channelId: string, public guildId?: string, public options: SendOptions = {}) {}
+  constructor(public bot: B, public channelId: string, public referrer?: any, public options: SendOptions = {}) {}
 
   async prepare() {}
 
@@ -49,7 +49,7 @@ export abstract class MessageEncoder<C extends Context = Context, B extends Bot<
       btn.attrs.id ||= r
       if (typeof btn.attrs.action === 'function') this.bot.callbacks[btn.attrs.id] = btn.attrs.action
     }
-    if (await this.session.app.serial(this.session, 'before-send', this.session, this.options)) return
+    if (await this.session.app.serial(this.session, 'before-send', this.session, this.options)) return []
     await this.render(this.session.elements)
     await this.flush()
     if (this.errors.length) {

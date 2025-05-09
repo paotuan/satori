@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "private": true,
-  "packageManager": "yarn@1.22.19",
+  "packageManager": "yarn@4.5.2",
   "workspaces": [
     "docs",
     "external/*",
@@ -15,7 +15,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "yakumo esbuild && yakumo tsc",
+    "build": "yakumo build",
     "bump": "yakumo version",
     "dep": "yakumo upgrade",
     "pub": "yakumo publish",
@@ -23,22 +23,22 @@
     "test": "yakumo test -r esbuild-register",
     "test:text": "shx rm -rf coverage && c8 -r text yarn test",
     "test:json": "shx rm -rf coverage && c8 -r json yarn test",
-    "test:html": "shx rm -rf coverage && c8 -r html yarn test"
+    "test:html": "shx rm -rf coverage && c8 -r html yarn test",
+    "sync:lark": "node --import tsx adapters/lark/scripts/types.ts"
   },
   "license": "MIT",
   "devDependencies": {
     "@cordisjs/eslint-config": "^1.1.1",
-    "@types/chai": "^4.3.14",
-    "@types/node": "^20.11.30",
+    "@types/node": "^22.7.5",
     "c8": "^7.14.0",
-    "chai": "^4.4.1",
-    "esbuild": "^0.18.20",
+    "esbuild": "^0.23.1",
     "esbuild-register": "^3.5.0",
     "eslint": "^8.57.0",
     "shx": "^0.3.4",
-    "typescript": "^5.4.3",
-    "yakumo": "^1.0.0-beta.15",
-    "yakumo-esbuild": "^1.0.0-beta.6",
-    "yakumo-tsc": "^1.0.0-beta.3"
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.2",
+    "yakumo": "^1.0.0-beta.20",
+    "yakumo-esbuild": "^1.0.0-beta.7",
+    "yakumo-tsc": "^1.0.0-beta.5"
   }
 }

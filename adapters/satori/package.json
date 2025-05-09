@@ -1,7 +1,7 @@
 {
   "name": "@satorijs/adapter-satori",
   "description": "Satori Adapter for Satorijs",
-  "version": "1.3.0",
+  "version": "1.5.0",
   "type": "module",
   "exports": {
     ".": {
@@ -35,7 +35,11 @@
     "im",
     "chat"
   ],
+  "devDependencies": {
+    "@satorijs/core": "^4.5.0",
+    "cordis": "^3.18.1"
+  },
   "peerDependencies": {
-    "@satorijs/core": "^4.1.0"
+    "@satorijs/core": "^4.5.0"
   }
 }
