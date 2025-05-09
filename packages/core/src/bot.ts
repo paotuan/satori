@@ -1,10 +1,13 @@
-import { clone, Dict, pick, remove } from 'cosmokit'
-import { Context, Logger } from 'cordis'
+import { clone, Dict, pick } from 'cosmokit'
+import { Context, Logger, Service } from 'cordis'
 import h from '@satorijs/element'
 import { Adapter } from './adapter'
 import { MessageEncoder } from './message'
 import { defineAccessor, Session } from './session'
+import { ExtractParams, InternalRequest, InternalRouter } from './internal'
 import { Event, List, Login, Methods, Response, SendOptions, Status, Upload, User } from '@satorijs/protocol'
+
+/* eslint-enable @typescript-eslint/no-unused-vars */
 
 const eventAliases = [
   ['message-created', 'message'],
@@ -18,62 +21,70 @@ export interface Bot extends Methods {
   internal: any
 }
 
-export abstract class Bot<C extends Context = Context, T = any> implements Login {
+export abstract class Bot<C extends Context = Context, T = any> {
   static reusable = true
-  static MessageEncoder?: new (bot: Bot, channelId: string, guildId?: string, options?: SendOptions) => MessageEncoder
+  static MessageEncoder?: new (bot: Bot, channelId: string, referrer?: any, options?: SendOptions) => MessageEncoder
 
-  public self = this
+  public [Service.tracker] = {
+    associate: 'bot',
+    property: 'ctx',
+  }
+
+  public sn: number
   public user = {} as User
   public isBot = true
   public hidden = false
   public platform: string
   public features: string[]
-  public proxyUrls: string[]
   public adapter?: Adapter<C, this>
   public error?: Error
   public callbacks: Dict<Function> = {}
   public logger: Logger
-  public [Context.current]: C
+
+  public _internalRouter: InternalRouter<C>
 
   // Same as `this.ctx`, but with a more specific type.
   protected context: Context
   protected _status: Status = Status.OFFLINE
 
   constructor(public ctx: C, public config: T, platform?: string) {
+    this.sn = ++ctx.satori._loginSeq
     this.internal = null
+    this._internalRouter = new InternalRouter(ctx)
     this.context = ctx
-    this[Context.current] = ctx
-    const self = Context.associate(this, 'bot')
-    ctx.bots.push(self)
-    self.context.emit('bot-added', self)
+    ctx.bots.push(this)
+    this.context.emit('bot-added', this)
     if (platform) {
-      self.logger = ctx.logger(platform)
-      self.platform = platform
+      this.logger = ctx.logger(platform)
+      this.platform = platform
     }
 
-    this.proxyUrls = [`upload://temp/${ctx.satori.uid}/`]
     this.features = Object.entries(Methods)
       .filter(([, value]) => this[value.name])
       .map(([key]) => key)
 
     ctx.on('ready', async () => {
       await Promise.resolve()
-      self.dispatchLoginEvent('login-added')
-      return self.start()
+      this.dispatchLoginEvent('login-added')
+      return this.start()
     })
 
-    ctx.on('dispose', () => self.dispose())
+    ctx.on('dispose', () => this.dispose())
 
     ctx.on('interaction/button', (session) => {
       const cb = this.callbacks[session.event.button.id]
       if (cb) cb(session)
     })
-
-    return self
   }
 
-  registerUpload(path: string, callback: (path: string) => Promise<Response>) {
-    this.ctx.satori.upload(path, callback, this.proxyUrls)
+  getInternalUrl(path: string, init?: ConstructorParameters<typeof URLSearchParams>[0], slash?: boolean) {
+    let search = new URLSearchParams(init).toString()
+    if (search) search = '?' + search
+    return `internal${slash ? '/' : ':'}${this.platform}/${this.selfId}${path}${search}`
+  }
+
+  defineInternalRoute<P extends string>(path: P, callback: (request: InternalRequest<C, ExtractParams<P>>) => Promise<Response>) {
+    return this._internalRouter.define(path, callback)
   }
 
   update(login: Login) {
@@ -85,9 +96,12 @@ export abstract class Bot<C extends Context = Context, T = any> implements Login
   }
 
   dispose() {
-    remove(this.ctx.bots, this)
-    this.context.emit('bot-removed', this)
-    this.dispatchLoginEvent('login-removed')
+    const index = this.ctx.bots.findIndex(bot => bot.sid === this.sid)
+    if (index >= 0) {
+      this.ctx.bots.splice(index, 1)
+      this.context.emit('bot-removed', this)
+      this.dispatchLoginEvent('login-removed')
+    }
     return this.stop()
   }
 
@@ -105,7 +119,7 @@ export abstract class Bot<C extends Context = Context, T = any> implements Login
   set status(value) {
     if (value === this._status) return
     this._status = value
-    if (this.ctx.bots?.includes(this)) {
+    if (this.ctx.bots?.some(bot => bot.sid === this.sid)) {
       this.context.emit('bot-status-updated', this)
       this.dispatchLoginEvent('login-updated')
     }
@@ -143,7 +157,7 @@ export abstract class Bot<C extends Context = Context, T = any> implements Login
       await this.context.parallel('bot-disconnect', this)
       await this.adapter?.disconnect(this)
     } catch (error) {
-      this.context.emit('internal/error', error)
+      this.context.emit(this.ctx, 'internal/error', error)
     } finally {
       this.offline()
     }
@@ -177,13 +191,13 @@ export abstract class Bot<C extends Context = Context, T = any> implements Login
     }
   }
 
-  async createMessage(channelId: string, content: h.Fragment, guildId?: string, options?: SendOptions) {
+  async createMessage(channelId: string, content: h.Fragment, referrer?: any, options?: SendOptions) {
     const { MessageEncoder } = this.constructor as typeof Bot
-    return new MessageEncoder(this, channelId, guildId, options).send(content)
+    return new MessageEncoder(this, channelId, referrer, options).send(content)
   }
 
-  async sendMessage(channelId: string, content: h.Fragment, guildId?: string, options?: SendOptions) {
-    const messages = await this.createMessage(channelId, content, guildId, options)
+  async sendMessage(channelId: string, content: h.Fragment, referrer?: any, options?: SendOptions) {
+    const messages = await this.createMessage(channelId, content, referrer, options)
     return messages.map(message => message.id)
   }
 
@@ -199,11 +213,11 @@ export abstract class Bot<C extends Context = Context, T = any> implements Login
       const headers = new Headers()
       headers.set('content-type', upload.type)
       if (upload.filename) {
-        headers.set('content-disposition', `attachment; filename="${upload.filename}"`)
+        headers.set('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(upload.filename)}`)
       }
       this.ctx.satori._tempStore[id] = {
         status: 200,
-        data: upload.data,
+        body: upload.data,
         headers,
       }
       ids.push(id)
@@ -216,8 +230,8 @@ export abstract class Bot<C extends Context = Context, T = any> implements Login
         delete this.ctx.satori._tempStore[id]
       }
     }
-    const _dispose = this[Context.current].on('dispose', dispose)
-    return ids.map(id => `upload://temp/${this.ctx.satori.uid}/${id}`)
+    const _dispose = this.ctx.on('dispose', dispose)
+    return ids.map(id => this.getInternalUrl(`/_tmp/${id}`))
   }
 
   async supports(name: string, session: Partial<C[typeof Context.session]> = {}) {
@@ -231,7 +245,12 @@ export abstract class Bot<C extends Context = Context, T = any> implements Login
   }
 
   toJSON(): Login {
-    return clone(pick(this, ['platform', 'selfId', 'status', 'user', 'hidden', 'features', 'proxyUrls']))
+    return clone({
+      ...pick(this, ['sn', 'platform', 'selfId', 'status', 'hidden', 'features']),
+      // make sure `user.id` is present
+      user: this.user.id ? this.user : undefined,
+      adapter: this.platform,
+    })
   }
 
   async getLogin() {

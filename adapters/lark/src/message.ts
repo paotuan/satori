@@ -1,37 +1,69 @@
-import { Context, h, MessageEncoder } from '@satorijs/core'
+import { Context, Dict, h, MessageEncoder } from '@satorijs/core'
 import { LarkBot } from './bot'
-import { BaseResponse, Lark, MessageContent, MessageType } from './types'
-import { extractIdType } from './utils'
-
-export interface Addition {
-  file: MessageContent.MediaContents
-  type: MessageType
-}
+import { CreateImFileForm, Message } from './types'
+import { EventPayload, extractIdType } from './utils'
+import { MessageContent } from './content'
 
 export class LarkMessageEncoder<C extends Context = Context> extends MessageEncoder<C, LarkBot<C>> {
-  private quote: string | undefined
-  private content = ''
-  private addition: Addition
-  // TODO: currently not used, would be supported in the future
-  private richText: MessageContent.RichText[string]
+  declare referrer?: EventPayload
+
+  private quote: Dict | undefined
+  private textContent = ''
+  private richContent: MessageContent.RichText.Paragraph[] = []
+  private card: MessageContent.Card | undefined
+  private noteElements: MessageContent.Card.NoteElement.InnerElement[] | undefined
+  private actionElements: MessageContent.Card.Element[] = []
+
+  public editMessageIds: string[] | undefined
 
   async post(data?: any) {
     try {
-      let resp: BaseResponse & { data?: Lark.Message }
-      if (this.quote) {
-        resp = await this.bot.internal.replyImMessage(this.quote, data)
+      let resp: Message
+      let quote = this.quote
+      if (!quote && this.referrer) {
+        if (this.referrer.type === 'im.message.receive_v1' && this.referrer.event.message.thread_id) {
+          quote = {
+            id: this.referrer.event.message.message_id,
+            replyInThread: true,
+          }
+        } else if (this.referrer.type === 'card.action.trigger') {
+          // cannot determine whether the card is in thread or not
+          const { items: [message] } = await this.bot.internal.getImMessage(this.referrer.event.context.open_message_id)
+          if (message?.thread_id) {
+            quote = {
+              id: this.referrer.event.context.open_message_id,
+              replyInThread: true,
+            }
+          }
+        }
+      }
+      if (this.editMessageIds) {
+        const messageId = this.editMessageIds.pop()
+        if (!messageId) throw new Error('No message to edit')
+        if (data.msg_type === 'interactive') {
+          delete data.msg_type
+          await this.bot.internal.patchImMessage(messageId, data)
+        } else {
+          await this.bot.internal.updateImMessage(messageId, data)
+        }
+      } else if (quote?.id) {
+        resp = await this.bot.internal.replyImMessage(quote.id, {
+          ...data,
+          reply_in_thread: quote.replyInThread,
+        })
       } else {
         data.receive_id = this.channelId
-        resp = await this.bot.internal?.createImMessage(data, {
+        resp = await this.bot.internal.createImMessage(data, {
           receive_id_type: extractIdType(this.channelId),
         })
       }
+      if (!resp) return
       const session = this.bot.session()
-      session.messageId = resp.data.message_id
-      session.timestamp = Number(resp.data.create_time) * 1000
-      session.userId = resp.data.sender.id
-      session.channelId = this.channelId
-      session.guildId = this.guildId
+      session.messageId = resp.message_id
+      session.timestamp = Number(resp.create_time) * 1000
+      session.userId = resp.sender.id
+      session.channelId = this.session.channelId
+      session.guildId = this.session.guildId
       session.app.emit(session, 'send', session)
       this.results.push(session.event.message)
     } catch (e) {
@@ -46,131 +78,308 @@ export class LarkMessageEncoder<C extends Context = Context> extends MessageEnco
     }
   }
 
-  async flush() {
-    if (this.content === '' && !this.addition && !this.richText) return
-
-    let message: MessageContent.Contents
-    if (this.addition) {
-      message = {
-        ...message,
-        ...this.addition.file,
+  private flushText(button = false) {
+    if ((this.textContent || !button) && this.actionElements.length) {
+      this.card!.elements.push({ tag: 'action', actions: this.actionElements, layout: 'flow' })
+      this.actionElements = []
+    }
+    if (this.textContent) {
+      this.richContent.push([{ tag: 'md', text: this.textContent }])
+      if (this.noteElements) {
+        this.noteElements.push({ tag: 'plain_text', content: this.textContent })
+      } else if (this.card) {
+        this.card.elements.push({ tag: 'markdown', content: this.textContent })
       }
+      this.textContent = ''
     }
-    if (this.richText) {
-      message = { zh_cn: this.richText }
+  }
+
+  async flush() {
+    this.flushText()
+    if (!this.card && !this.richContent.length) return
+
+    if (this.card) {
+      this.bot.logger.debug('card', JSON.stringify(this.card.elements))
+      await this.post({
+        msg_type: 'interactive',
+        content: JSON.stringify({
+          header: this.card.header,
+          elements: this.card.elements,
+        }),
+      })
+    } else {
+      await this.post({
+        msg_type: 'post',
+        content: JSON.stringify({
+          zh_cn: {
+            content: this.richContent,
+          },
+        }),
+      })
     }
-    if (this.content) {
-      message = { text: this.content }
-    }
-    await this.post({
-      msg_type: this.richText ? 'post' : this.addition ? this.addition.type : 'text',
-      content: JSON.stringify(message),
-    })
 
     // reset cached content
     this.quote = undefined
-    this.content = ''
-    this.addition = undefined
-    this.richText = undefined
+    this.textContent = ''
+    this.richContent = []
+    this.card = undefined
   }
 
-  async sendFile(type: 'img' | 'image' | 'video' | 'audio' | 'file', url: string): Promise<Addition> {
-    const payload = new FormData()
+  async createImage(url: string) {
+    const { filename, type, data } = await this.bot.assetsQuester.file(url)
+    const { image_key } = await this.bot.internal.createImImage({
+      image_type: 'message',
+      image: new File([data], filename, { type }),
+    })
+    return image_key
+  }
 
-    const assetKey = type === 'img' || type === 'image' ? 'image' : 'file'
-    const { filename, mime, data } = await this.bot.assetsQuester.file(url)
-    payload.append(assetKey, new Blob([data], { type: mime }), filename)
+  async sendFile(_type: 'video' | 'audio' | 'file', attrs: any) {
+    const url: string = attrs.src || attrs.url
+    const prefix = this.bot.getInternalUrl('/im/v1/files/')
+    if (url.startsWith(prefix)) {
+      const file_key = url.slice(prefix.length)
+      await this.post({
+        msg_type: _type === 'video' ? 'media' : _type,
+        content: JSON.stringify({ file_key }),
+      })
+      return
+    }
 
-    if (type === 'img' || type === 'image') {
-      payload.append('image_type', 'message')
-      const { data } = await this.bot.internal.createImImage(payload)
-      return {
-        type: 'image',
-        file: {
-          image_key: data.image_key,
-        },
-      }
+    const { filename, type, data } = await this.bot.assetsQuester.file(url)
+
+    let file_type: CreateImFileForm['file_type']
+    if (_type === 'audio') {
+      // FIXME: only support opus
+      file_type = 'opus'
+    } else if (_type === 'video') {
+      // FIXME: only support mp4
+      file_type = 'mp4'
     } else {
-      let msgType: MessageType = 'file'
-      if (type === 'audio') {
-        // FIXME: only support opus
-        payload.append('file_type', 'opus')
-        msgType = 'audio'
-      } else if (type === 'video') {
-        // FIXME: only support mp4
-        payload.append('file_type', 'mp4')
-        msgType = 'media'
+      const ext = filename.split('.').pop()
+      if (['doc', 'xls', 'ppt', 'pdf'].includes(ext)) {
+        file_type = ext as any
       } else {
-        const ext = filename.split('.').pop()
-        if (['xls', 'ppt', 'pdf'].includes(ext)) {
-          payload.append('file_type', ext)
-        } else {
-          payload.append('file_type', 'stream')
-        }
-      }
-      payload.append('file_name', filename)
-      const { data } = await this.bot.internal.createImFile(payload)
-      return {
-        type: msgType,
-        file: {
-          file_key: data.file_key,
-        },
+        file_type = 'stream'
       }
     }
+
+    const form: CreateImFileForm = {
+      file_type,
+      file: new File([data], filename, { type }),
+      file_name: filename,
+    }
+    if (attrs.duration) {
+      form.duration = attrs.duration
+    }
+
+    const { file_key } = await this.bot.internal.createImFile(form)
+    await this.post({
+      msg_type: _type === 'video' ? 'media' : _type,
+      content: JSON.stringify({ file_key }),
+    })
+  }
+
+  private createBehavior(attrs: Dict) {
+    const behaviors: MessageContent.Card.ActionBehavior[] = []
+    if (attrs.type === 'link') {
+      behaviors.push({
+        type: 'open_url',
+        default_url: attrs.href,
+      })
+    } else if (attrs.type === 'input') {
+      behaviors.push({
+        type: 'callback',
+        value: {
+          _satori_type: 'command',
+          content: attrs.text,
+        },
+      })
+    } else if (attrs.type === 'action') {
+      // TODO
+    }
+    return behaviors.length ? behaviors : undefined
   }
 
   async visit(element: h) {
     const { type, attrs, children } = element
-
-    switch (type) {
-      case 'text':
-        this.content += attrs.content
-        break
-      case 'at': {
-        if (attrs.type === 'all') {
-          this.content += `<at user_id="all">${attrs.name ?? '所有人'}</at>`
-        } else {
-          this.content += `<at user_id="${attrs.id}">${attrs.name}</at>`
-        }
-        break
+    if (type === 'text') {
+      this.textContent += attrs.content
+    } else if (type === 'at') {
+      if (attrs.type === 'all') {
+        this.textContent += `<at user_id="all">${attrs.name ?? '所有人'}</at>`
+      } else {
+        this.textContent += `<at user_id="${attrs.id}">${attrs.name}</at>`
       }
-      case 'a':
-        await this.render(children)
-        if (attrs.href) this.content += ` (${attrs.href})`
-        break
-      case 'p':
-        if (!this.content.endsWith('\n')) this.content += '\n'
-        await this.render(children)
-        if (!this.content.endsWith('\n')) this.content += '\n'
-        break
-      case 'br':
-        this.content += '\n'
-        break
-      case 'sharp':
-        // platform does not support sharp
-        break
-      case 'quote':
+    } else if (type === 'a') {
+      await this.render(children)
+      if (attrs.href) this.textContent += ` (${attrs.href})`
+    } else if (type === 'p') {
+      if (!this.textContent.endsWith('\n')) this.textContent += '\n'
+      await this.render(children)
+      if (!this.textContent.endsWith('\n')) this.textContent += '\n'
+    } else if (type === 'br') {
+      this.textContent += '\n'
+    } else if (type === 'sharp') {
+      // platform does not support sharp
+    } else if (type === 'quote') {
+      await this.flush()
+      this.quote = attrs
+    } else if (type === 'img' || type === 'image') {
+      const image_key = await this.createImage(attrs.src || attrs.url)
+      this.textContent += `![${attrs.alt ?? '图片'}](${image_key})`
+      this.flushText()
+      this.richContent.push([{ tag: 'img', image_key }])
+    } else if (['video', 'audio', 'file'].includes(type)) {
+      await this.flush()
+      await this.sendFile(type as any, attrs)
+    } else if (type === 'figure' || type === 'message') {
+      await this.flush()
+      await this.render(children, true)
+    } else if (type === 'hr') {
+      this.flushText()
+      this.richContent.push([{ tag: 'hr' }])
+      this.card?.elements.push({ tag: 'hr' })
+    } else if (type === 'form') {
+      this.flushText()
+      const length = this.card?.elements.length
+      await this.render(children)
+      if (this.card?.elements.length > length) {
+        const elements = this.card?.elements.slice(length)
+        this.card.elements.push({
+          tag: 'form',
+          name: attrs.name || 'Form',
+          elements,
+        })
+      }
+    } else if (type === 'input') {
+      this.flushText()
+      this.card?.elements.push({
+        tag: 'action',
+        actions: [{
+          tag: 'input',
+          name: attrs.name,
+          width: attrs.width,
+          label: attrs.label && {
+            tag: 'plain_text',
+            content: attrs.label,
+          },
+          placeholder: attrs.placeholder && {
+            tag: 'plain_text',
+            content: attrs.placeholder,
+          },
+          behaviors: this.createBehavior(attrs),
+        }],
+      })
+    } else if (type === 'button') {
+      this.card ??= { elements: [] }
+      this.flushText(true)
+      await this.render(children)
+      this.actionElements.push({
+        tag: 'button',
+        text: {
+          tag: 'plain_text',
+          content: this.textContent,
+        },
+        disabled: attrs.disabled,
+        behaviors: this.createBehavior(attrs),
+        type: attrs['lark:type'],
+        size: attrs['lark:size'],
+        width: attrs['lark:width'],
+        icon: attrs['lark:icon'] && {
+          tag: 'standard_icon',
+          token: attrs['lark:icon'],
+        },
+        hover_tips: attrs['lark:hover-tips'] && {
+          tag: 'plain_text',
+          content: attrs['lark:hover-tips'],
+        },
+        disabled_tips: attrs['lark:disabled-tips'] && {
+          tag: 'plain_text',
+          content: attrs['lark:disabled-tips'],
+        },
+      })
+      this.textContent = ''
+    } else if (type === 'button-group') {
+      this.flushText()
+      await this.render(children)
+      this.flushText()
+    } else if (type.startsWith('lark:') || type.startsWith('feishu:')) {
+      const tag = type.slice(type.split(':', 1)[0].length + 1)
+      if (tag === 'share-chat') {
         await this.flush()
-        this.quote = attrs.id
-        break
-      case 'img':
-      case 'image':
-      case 'video':
-      case 'audio':
-      case 'file':
-        if (attrs.src || attrs.url) {
-          await this.flush()
-          this.addition = await this.sendFile(type, attrs.src || attrs.url)
-          await this.flush()
+        await this.post({
+          msg_type: 'share_chat',
+          content: JSON.stringify({ chat_id: attrs.chatId }),
+        })
+      } else if (tag === 'share-user') {
+        await this.flush()
+        await this.post({
+          msg_type: 'share_user',
+          content: JSON.stringify({ user_id: attrs.userId }),
+        })
+      } else if (tag === 'system') {
+        await this.flush()
+        await this.render(children)
+        await this.post({
+          msg_type: 'system',
+          content: JSON.stringify({
+            type: 'divider',
+            params: { divider_text: { text: this.textContent } },
+            options: { need_rollup: attrs.needRollup },
+          }),
+        })
+        this.textContent = ''
+      } else if (tag === 'card') {
+        await this.flush()
+        this.card = {
+          elements: [],
+          header: attrs.title && {
+            template: attrs.color,
+            ud_icon: attrs.icon && {
+              tag: 'standard_icon',
+              token: attrs.icon,
+            },
+            title: {
+              tag: 'plain_text',
+              content: attrs.title,
+            },
+            subtitle: attrs.subtitle && {
+              tag: 'plain_text',
+              content: attrs.subtitle,
+            },
+          },
         }
-        break
-      case 'figure': // FIXME: treat as message element for now
-      case 'message':
-        await this.flush()
         await this.render(children, true)
-        break
-      default:
+      } else if (tag === 'div') {
+        this.flushText()
         await this.render(children)
+        this.card?.elements.push({
+          tag: 'markdown',
+          text_align: attrs.align,
+          text_size: attrs.size,
+          content: this.textContent,
+        })
+        this.textContent = ''
+      } else if (tag === 'note') {
+        this.flushText()
+        this.noteElements = []
+        await this.render(children)
+        this.flushText()
+        this.card?.elements.push({
+          tag: 'note',
+          elements: this.noteElements,
+        })
+        this.noteElements = undefined
+      } else if (tag === 'icon') {
+        this.flushText()
+        this.noteElements?.push({
+          tag: 'standard_icon',
+          token: attrs.token,
+        })
+      }
+    } else {
+      await this.render(children)
     }
   }
 }

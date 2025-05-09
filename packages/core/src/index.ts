@@ -1,9 +1,10 @@
 import { Context, Logger, Service, z } from 'cordis'
-import { Awaitable, defineProperty, Dict, makeArray, remove } from 'cosmokit'
+import { Awaitable, defineProperty, Dict } from 'cosmokit'
 import { Bot } from './bot'
+import { ExtractParams, InternalRequest, InternalRouter, JsonForm } from './internal'
 import { Session } from './session'
 import { HTTP } from '@cordisjs/plugin-http'
-import { Response, SendOptions } from '@satorijs/protocol'
+import { Meta, Response, SendOptions } from '@satorijs/protocol'
 import h from '@satorijs/element'
 
 h.warn = new Logger('element').warn
@@ -22,6 +23,7 @@ export * as Universal from '@satorijs/protocol'
 export * from './bot'
 export * from './adapter'
 export * from './message'
+export * from './internal'
 export * from './session'
 
 declare module 'cordis' {
@@ -37,6 +39,7 @@ declare module 'cordis' {
   }
 
   interface Events<C> {
+    'satori/meta'(): void
     'internal/session'(session: GetSession<C>): void
     'interaction/command'(session: GetSession<C>): void
     'interaction/button'(session: GetSession<C>): void
@@ -78,16 +81,9 @@ declare module 'cordis' {
 
 declare module '@cordisjs/plugin-http' {
   namespace HTTP {
-    export const Config: z<Config>
     export function createConfig(this: typeof HTTP, endpoint?: string | boolean): z<Config>
   }
 }
-
-defineProperty(HTTP, 'Config', z.object({
-  timeout: z.natural().role('ms').description('等待连接建立的最长时间。'),
-  proxyAgent: z.string().description('使用的代理服务器地址。'),
-  keepAlive: z.boolean().description('是否保持连接。'),
-}).description('请求设置'))
 
 HTTP.createConfig = function createConfig(this, endpoint) {
   return z.object({
@@ -109,11 +105,6 @@ export namespace Component {
 
 export type GetSession<C extends Context> = C[typeof Context.session]
 
-type CordisEvents<C extends Context> = import('cordis').Events<C>
-
-// FIXME remove in the future
-export interface Events<C extends Context = Context> extends CordisEvents<C> {}
-
 class SatoriContext extends Context {
   constructor(config?: any) {
     super(config)
@@ -124,9 +115,48 @@ class SatoriContext extends Context {
 
 export { SatoriContext as Context }
 
-export interface UploadRoute {
-  path: string | string[] | (() => string | string[])
-  callback: (path: string) => Promise<Response>
+class DisposableSet<T> {
+  private sn = 0
+  private map1 = new Map<number, T[]>()
+  private map2 = new Map<T, Set<number>>()
+
+  constructor(private ctx: Context) {
+    defineProperty(this, Service.tracker, {
+      property: 'ctx',
+    })
+  }
+
+  add(...values: T[]) {
+    const sn = ++this.sn
+    return this.ctx.effect(() => {
+      let hasUpdate = false
+      for (const value of values) {
+        if (!this.map2.has(value)) {
+          this.map2.set(value, new Set())
+          hasUpdate = true
+        }
+        this.map2.get(value)!.add(sn)
+      }
+      this.map1.set(sn, values)
+      if (hasUpdate) this.ctx.emit('satori/meta')
+      return () => {
+        let hasUpdate = false
+        this.map1.delete(sn)
+        for (const value of values) {
+          this.map2.get(value)!.delete(sn)
+          if (this.map2.get(value)!.size === 0) {
+            this.map2.delete(value)
+            hasUpdate = true
+          }
+        }
+        if (hasUpdate) this.ctx.emit('satori/meta')
+      }
+    })
+  }
+
+  [Symbol.iterator]() {
+    return new Set(([] as T[]).concat(...this.map1.values()))[Symbol.iterator]()
+  }
 }
 
 export class Satori<C extends Context = Context> extends Service<unknown, C> {
@@ -134,31 +164,62 @@ export class Satori<C extends Context = Context> extends Service<unknown, C> {
   static [Service.immediate] = true
 
   public uid = Math.random().toString(36).slice(2)
+  public proxyUrls: DisposableSet<string> = new DisposableSet(this.ctx)
 
-  _uploadRoutes: UploadRoute[] = []
-  _tempStore: Dict<Response> = Object.create(null)
+  public _internalRouter: InternalRouter<C>
+  public _tempStore: Dict<Response> = Object.create(null)
+
+  public _loginSeq = 0
+  public _sessionSeq = 0
 
   constructor(ctx?: C) {
     super(ctx)
     ctx.mixin('satori', ['bots', 'component'])
 
-    this.upload(`/temp/${this.uid}/`, async (path) => {
-      const id = path.split('/').pop()
-      return this._tempStore[id] ?? { status: 404 }
-    })
+    defineProperty(this.bots, Service.tracker, {})
 
     const self = this
-    ;(ctx as Context).on('http/file', async function (url, options) {
-      if (!url.startsWith('upload://')) return
-      const { status, data, headers } = await self.download(url.slice(9))
-      if (status >= 400) throw new Error(`Failed to fetch ${url}, status code: ${status}`)
+    ;(ctx as Context).on('http/file', async function (_url, options) {
+      const url = new URL(_url)
+      if (url.protocol !== 'internal:') return
+      const { status, body, headers } = await self.handleInternalRoute('GET', url)
+      if (status >= 400) throw new Error(`Failed to fetch ${_url}, status code: ${status}`)
       if (status >= 300) {
         const location = headers?.get('location')
         return this.file(location, options)
       }
       const type = headers?.get('content-type')
       const filename = headers?.get('content-disposition')?.split('filename=')[1]
-      return { data, filename, type, mime: type }
+      return { data: body, filename, type, mime: type }
+    })
+
+    this._internalRouter = new InternalRouter(ctx)
+
+    this.defineInternalRoute('/_tmp/:id', async ({ params, method }) => {
+      if (method !== 'GET') return { status: 405 }
+      return this._tempStore[params.id] ?? { status: 404 }
+    })
+
+    this.defineInternalRoute('/_api/:name', async ({ bot, headers, params, method, body }) => {
+      if (method !== 'POST') return { status: 405 }
+      const args = await JsonForm.decode({ body, headers: new Headers(headers) })
+      if (!args) return { status: 400 }
+      try {
+        let result = bot.internal[params.name](...args)
+        if (headers['satori-pagination']) {
+          if (!result?.[Symbol.for('satori.pagination')]) {
+            return { status: 400, statusText: 'This API does not support pagination' }
+          }
+          result = await result[Symbol.for('satori.pagination')]()
+        } else {
+          result = await result
+        }
+        return { ...await JsonForm.encode(result), status: 200 }
+      } catch (error) {
+        if (!ctx.http.isError(error) || !error.response) throw error
+        // FIXME: missing response body
+        return error.response
+      }
     })
   }
 
@@ -191,26 +252,27 @@ export class Satori<C extends Context = Context> extends Service<unknown, C> {
     return this.ctx.set('component:' + name, render)
   }
 
-  upload(path: UploadRoute['path'], callback: UploadRoute['callback'], proxyUrls: UploadRoute['path'][] = []) {
-    return this[Context.current].effect(() => {
-      const route: UploadRoute = { path, callback }
-      this._uploadRoutes.push(route)
-      proxyUrls.push(path)
-      return () => {
-        remove(this._uploadRoutes, route)
-        remove(proxyUrls, path)
-      }
-    })
+  defineInternalRoute<P extends string>(path: P, callback: (request: InternalRequest<C, ExtractParams<P>>) => Promise<Response>) {
+    return this._internalRouter.define(path, callback)
   }
 
-  async download(path: string) {
-    for (const route of this._uploadRoutes) {
-      const paths = makeArray(typeof route.path === 'function' ? route.path() : route.path)
-      if (paths.some(prefix => path.startsWith(prefix))) {
-        return route.callback(path)
-      }
+  async handleInternalRoute(method: HTTP.Method, url: URL, headers = new Headers(), body?: any): Promise<Response> {
+    const capture = /^([^/]+)\/([^/]+)(\/.+)$/.exec(url.pathname)
+    if (!capture) return { status: 400 }
+    const [, platform, selfId, path] = capture
+    const bot = this.bots[`${platform}:${selfId}`]
+    if (!bot) return { status: 404 }
+    let response = await this._internalRouter.handle(bot, method, path, url.searchParams, headers, body)
+    response ??= await bot._internalRouter.handle(bot, method, path, url.searchParams, headers, body)
+    if (!response) return { status: 404 }
+    return response
+  }
+
+  toJSON(meta = false): Meta {
+    return {
+      logins: meta ? undefined : this.bots.map(bot => bot.toJSON()),
+      proxyUrls: [...this.proxyUrls],
     }
-    return { status: 404 }
   }
 }
 

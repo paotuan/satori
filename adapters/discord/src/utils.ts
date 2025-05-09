@@ -10,8 +10,13 @@ export const sanitize = (val: string) =>
     .replace(/@everyone/g, () => '\\@everyone')
     .replace(/@here/g, () => '\\@here')
 
+// discord has no way to escape ` in code/codeblock, so we use zero-width space as a fallback.
+// we don't need or have to do any escape other than ` in code/codeblock.
+export const sanitizeCode = (val: string) => val.replace(/(?<=`)(?=`)/g, '\u200b')
+
 export const decodeUser = (user: Discord.User): Universal.User => ({
   id: user.id,
+  nick: user.global_name,
   name: user.username,
   userId: user.id,
   avatar: user.avatar && `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png`,
@@ -90,6 +95,16 @@ export async function decodeMessage(
       })
   }
 
+  if (data.sticker_items) {
+    message.content += data.sticker_items.map(s => h('sticker', {
+      id: s.id,
+      format_type: s.format_type,
+      name: s.name,
+    }, [
+      h.image(`https://media.discordapp.net/stickers/${s.id}.webp?size=160`),
+    ])).join('')
+  }
+
   // embed 的 update event 太阴间了 只有 id embeds channel_id guild_id 四个成员
   if (data.attachments?.length) {
     if (!/\s$/.test(message.content)) message.content += ' '
@@ -147,7 +162,10 @@ export async function decodeMessage(
   }
   message.elements = h.parse(message.content)
   // 遇到过 cross post 的消息在这里不会传消息 id
-  if (details && data.message_reference) {
+  // https://github.com/satorijs/satori/issues/306
+  // THREAD_CREATED (18) 事件下，message_reference 没有 message_id
+  // THREAD_STARTER_MESSAGE (21) 事件下，message_reference 有 message_id
+  if (details && data.message_reference?.message_id) {
     const { message_id, channel_id } = data.message_reference
     message.quote = await bot.getMessage(channel_id, message_id, false)
   }
@@ -334,6 +352,8 @@ const types = {
   number: Discord.ApplicationCommand.OptionType.NUMBER,
   integer: Discord.ApplicationCommand.OptionType.INTEGER,
   posint: Discord.ApplicationCommand.OptionType.INTEGER,
+  natural: Discord.ApplicationCommand.OptionType.INTEGER,
+  bigint: Discord.ApplicationCommand.OptionType.INTEGER,
   user: Discord.ApplicationCommand.OptionType.STRING,
   channel: Discord.ApplicationCommand.OptionType.STRING,
   guild: Discord.ApplicationCommand.OptionType.STRING,
@@ -361,14 +381,30 @@ export const encodeCommand = (cmd: Universal.Command): Discord.ApplicationComman
   options: encodeCommandOptions(cmd),
 })
 
-const decodeArgv = (data: Discord.InteractionData.ApplicationCommand, command: Universal.Command) => {
-  const result = { name: data.name, arguments: [], options: {} } as Universal.Argv
+const decodeArgv = (
+  data: Discord.InteractionData.ApplicationCommand | Discord.InteractionData.ApplicationCommand.Option,
+  command: Universal.Command,
+) => {
+  const result = { name: command.name, arguments: [], options: {} } as Universal.Argv
+  const options = data.options
+  if (!options) return result
+  const dataChild = options[0]
+  if (dataChild && (
+    // eslint-disable-next-line operator-linebreak
+    dataChild.type === Discord.ApplicationCommand.OptionType.SUB_COMMAND ||
+    dataChild.type === Discord.ApplicationCommand.OptionType.SUB_COMMAND_GROUP
+  )) {
+    const commandChild = command.children.find(cmd => cmd.name.endsWith('.' + dataChild.name))
+    return commandChild ? decodeArgv(dataChild, commandChild) : result
+  }
   for (const argument of command.arguments) {
-    const value = data.options?.find(opt => opt.name === argument.name)?.value
+    const name = argument.name.toLowerCase()
+    const value = options.find(opt => opt.name === name)?.value
     if (value !== undefined) result.arguments.push(value)
   }
   for (const option of command.options) {
-    const value = data.options?.find(opt => opt.name === option.name)?.value
+    const name = option.name.toLowerCase()
+    const value = options.find(opt => opt.name === name)?.value
     if (value !== undefined) result.options[option.name] = value
   }
   return result
@@ -383,8 +419,8 @@ export function encodeCommandOptions(cmd: Universal.Command): Discord.Applicatio
         ? Discord.ApplicationCommand.OptionType.SUB_COMMAND_GROUP
         : Discord.ApplicationCommand.OptionType.SUB_COMMAND,
       options: encodeCommandOptions(child),
-      description: cmd.description[''] || child.name,
-      description_localizations: pick(cmd.description, Discord.Locale),
+      description: child.description[''] || child.name,
+      description_localizations: pick(child.description, Discord.Locale),
     })))
   } else {
     for (const arg of cmd.arguments) {
@@ -401,7 +437,7 @@ export function encodeCommandOptions(cmd: Universal.Command): Discord.Applicatio
         name: option.name.toLowerCase(),
         type: types[option.type] ?? types.text,
         required: false,
-        min_value: option.type === 'posint' ? 1 : undefined,
+        min_value: option.type === 'posint' ? 1 : option.type === 'natural' ? 0 : undefined,
       })
     }
   }
