@@ -4,6 +4,7 @@ import * as QQ from '../types'
 import { QQGuildBot } from './guild'
 import { QQMessageEncoder } from '../message'
 import { GroupInternal } from '../internal'
+import { HttpServer } from '../http'
 import { decodeUser } from '../utils'
 
 interface GetAppAccessTokenResult {
@@ -13,13 +14,15 @@ interface GetAppAccessTokenResult {
 
 export class QQBot<C extends Context = Context> extends Bot<C, QQBot.Config> {
   static MessageEncoder = QQMessageEncoder
-  static inject = ['http']
+  static inject = {
+    required: ['http'],
+    optional: ['server'],
+  }
 
   public guildBot: QQGuildBot<C>
 
   internal: GroupInternal
   http: HTTP
-  guildHttp: HTTP
 
   private _token: string
   private _timer: NodeJS.Timeout
@@ -30,10 +33,12 @@ export class QQBot<C extends Context = Context> extends Bot<C, QQBot.Config> {
     if (config.sandbox) {
       endpoint = endpoint.replace(/^(https?:\/\/)/, '$1sandbox.')
     }
-    this.guildHttp = ctx.http.extend({
+    // 如果是 bot 类型, 使用固定 token
+    this.http = this.ctx.http.extend({
       endpoint,
       headers: {
-        'Authorization': `Bot ${this.config.id}.${this.config.token}`,
+        'Authorization': this.config.authType === 'bot' ? `Bot ${this.config.id}.${this.config.token}` : '',
+        'X-Union-Appid': this.config.id,
       },
     })
 
@@ -41,7 +46,11 @@ export class QQBot<C extends Context = Context> extends Bot<C, QQBot.Config> {
       parent: this,
     })
     this.internal = new GroupInternal(this, () => this.http)
-    this.ctx.plugin(WsClient, this)
+    if (config.protocol === 'websocket') {
+      this.ctx.plugin(WsClient, this)
+    } else {
+      this.ctx.plugin(HttpServer, this)
+    }
   }
 
   async initialize() {
@@ -74,18 +83,8 @@ export class QQBot<C extends Context = Context> extends Bot<C, QQBot.Config> {
         this.logger.warn(`POST https://bots.qq.com/app/getAppAccessToken response: %o, trace id: %s`, result.data, result.headers.get('x-tps-trace-id'))
         throw new Error('failed to refresh access token')
       }
-      let endpoint = this.config.endpoint
-      if (this.config.sandbox) {
-        endpoint = endpoint.replace(/^(https?:\/\/)/, '$1sandbox.')
-      }
       this._token = result.data.access_token
-      this.http = this.ctx.http.extend({
-        endpoint,
-        headers: {
-          'Authorization': `QQBot ${this._token}`,
-          'X-Union-Appid': this.config.id,
-        },
-      })
+      this.http.config.headers.Authorization = `QQBot ${this._token}`
       // 在上一个 access_token 接近过期的 60 秒内
       // 重新请求可以获取到一个新的 access_token
       this._timer = setTimeout(() => {
@@ -125,10 +124,15 @@ export class QQBot<C extends Context = Context> extends Bot<C, QQBot.Config> {
 }
 
 export namespace QQBot {
-  export interface Config extends QQ.Options, WsClient.Options {
+  export interface BaseConfig extends QQ.Options {
     intents?: number
     retryWhen: number[]
+    manualAcknowledge: boolean
+    protocol: 'websocket' | 'webhook'
+    path?: string
   }
+
+  export type Config = BaseConfig & (HttpServer.Options | WsClient.Options)
 
   export const Config: Schema<Config> = Schema.intersect([
     Schema.object({
@@ -138,10 +142,17 @@ export namespace QQBot {
       type: Schema.union(['public', 'private'] as const).description('机器人类型。').required(),
       sandbox: Schema.boolean().description('是否开启沙箱模式。').default(false),
       endpoint: Schema.string().role('link').description('要连接的服务器地址。').default('https://api.sgroup.qq.com/'),
-      authType: Schema.union(['bot', 'bearer'] as const).description('采用的验证方式。').default('bot'),
+      authType: Schema.union(['bot', 'bearer'] as const).description('采用的验证方式。').default('bearer'),
       intents: Schema.bitset(QQ.Intents).description('需要订阅的机器人事件。'),
       retryWhen: Schema.array(Number).description('发送消息遇到平台错误码时重试。').default([]),
+      protocol: Schema.union(['websocket', 'webhook']).description('选择要使用的协议。').default('websocket'),
     }),
-    WsClient.Options,
+    Schema.union([
+      WsClient.Options,
+      HttpServer.Options,
+    ]),
+    Schema.object({
+      manualAcknowledge: Schema.boolean().description('手动响应回调消息。').default(false),
+    }).description('高级设置'),
   ] as const)
 }

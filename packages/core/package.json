@@ -1,17 +1,18 @@
 {
   "name": "@satorijs/core",
   "description": "Core components of Satorijs",
-  "version": "4.1.0",
+  "version": "4.5.0",
   "type": "module",
   "main": "lib/index.cjs",
   "module": "lib/index.mjs",
   "types": "lib/index.d.ts",
   "exports": {
     ".": {
+      "types": "./lib/index.d.ts",
       "require": "./lib/index.cjs",
-      "import": "./lib/index.mjs",
-      "types": "./lib/index.d.ts"
+      "import": "./lib/index.mjs"
     },
+    "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
   "files": [
@@ -33,15 +34,12 @@
     "satori",
     "element",
     "message",
-    "utilities"
+    "utilities",
+    "cordis"
   ],
-  "scripts": {
-    "compile:cjs": "esbuild src/index.ts --outfile=lib/index.cjs --bundle --sourcemap --sources-content=false --platform=node --external:cosmokit --external:cordis --target=es2022",
-    "compile:esm": "esbuild src/index.ts --outfile=lib/index.mjs --bundle --sourcemap --sources-content=false --platform=neutral --external:cosmokit --external:cordis --target=es2022",
-    "build": "yarn compile:cjs && yarn compile:esm && yarn dtsc"
-  },
   "cordis": {
     "ecosystem": {
+      "name": "satori",
       "pattern": [
         "@satorijs/adapter-*",
         "@satorijs/plugin-*",
@@ -56,13 +54,14 @@
     }
   },
   "peerDependencies": {
-    "cordis": "^3.15.3"
+    "cordis": "^3.18.1"
   },
   "dependencies": {
-    "@cordisjs/plugin-http": "^0.5.1",
+    "@cordisjs/plugin-http": "^0.6.3",
     "@satorijs/element": "^3.1.7",
-    "@satorijs/protocol": "^1.4.0",
-    "cordis": "^3.15.3",
-    "cosmokit": "^1.6.2"
+    "@satorijs/protocol": "^1.6.0",
+    "cordis": "^3.18.1",
+    "cosmokit": "^1.6.3",
+    "path-to-regexp": "^8.2.0"
   }
 }

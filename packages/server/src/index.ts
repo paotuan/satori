@@ -1,15 +1,10 @@
-import { Binary, camelCase, Context, makeArray, sanitize, Schema, Service, Session, snakeCase, Time, Universal } from '@satorijs/core'
+import { Context, Schema, Service, Session, Universal } from '@satorijs/core'
+import { Binary, camelCase, defineProperty, makeArray, sanitize, snakeCase, Time } from 'cosmokit'
 import {} from '@cordisjs/plugin-server'
 import WebSocket from 'ws'
 import { Readable } from 'node:stream'
-import { ReadableStream } from 'node:stream/web'
 import { readFile } from 'node:fs/promises'
-
-declare module 'cordis' {
-  interface Context {
-    'satori.server': SatoriServer
-  }
-}
+import { Middleware, ParameterizedContext } from 'koa'
 
 declare module '@satorijs/core' {
   interface Satori {
@@ -23,14 +18,14 @@ class Client {
   authorized = false
 }
 
-function transformKey(source: any, callback: (key: string) => string) {
-  if (!source || typeof source !== 'object') return source
-  if (Array.isArray(source)) return source.map(value => transformKey(value, callback))
-  return Object.fromEntries(Object.entries(source).map(([key, value]) => {
-    if (key.startsWith('_')) return [key, value]
-    return [callback(key), transformKey(value, callback)]
-  }))
-}
+const FILTER_HEADERS = [
+  'host',
+  'authorization',
+  'satori-user-id',
+  'satori-platform',
+  'x-self-id',
+  'x-platform',
+]
 
 class SatoriServer extends Service<SatoriServer.Config> {
   static inject = ['server', 'http']
@@ -39,6 +34,15 @@ class SatoriServer extends Service<SatoriServer.Config> {
     super(ctx, 'satori.server', true)
     const logger = ctx.logger('server')
     const path = sanitize(config.path)
+
+    function checkAuth(koa: ParameterizedContext) {
+      if (!config.token) return
+      if (koa.request.headers.authorization !== `Bearer ${config.token}`) {
+        koa.body = 'invalid token'
+        koa.status = 403
+        return true
+      }
+    }
 
     ctx.server.get(path + '/v1/:name', async (koa, next) => {
       const method = Universal.Methods[koa.params.name]
@@ -55,16 +59,10 @@ class SatoriServer extends Service<SatoriServer.Config> {
         return
       }
 
-      if (config.token) {
-        if (koa.request.headers.authorization !== `Bearer ${config.token}`) {
-          koa.body = 'invalid token'
-          koa.status = 403
-          return
-        }
-      }
+      if (checkAuth(koa)) return
 
-      const selfId = koa.request.headers['x-self-id']
-      const platform = koa.request.headers['x-platform']
+      const selfId = koa.request.headers['satori-user-id'] ?? koa.request.headers['x-self-id']
+      const platform = koa.request.headers['satori-platform'] ?? koa.request.headers['x-platform']
       const bot = ctx.bots.find(bot => bot.selfId === selfId && bot.platform === platform)
       if (!bot) {
         koa.body = 'login not found'
@@ -92,72 +90,105 @@ class SatoriServer extends Service<SatoriServer.Config> {
 
       const json = koa.request.body
       const args = method.fields.map(({ name }) => {
-        return transformKey(json[name], camelCase)
+        if (name === 'referrer') return json[name]
+        return Universal.transformKey(json[name], camelCase)
       })
       const result = await bot[method.name](...args)
-      koa.body = transformKey(result, snakeCase)
+      koa.body = Universal.transformKey(result, snakeCase)
       koa.status = 200
     })
 
-    ctx.server.post(path + '/v1/internal/:name', async (koa) => {
-      const selfId = koa.request.headers['x-self-id']
-      const platform = koa.request.headers['x-platform']
-      const bot = ctx.bots.find(bot => bot.selfId === selfId && bot.platform === platform)
-      if (!bot) {
-        koa.body = 'login not found'
-        koa.status = 403
-        return
+    const marker: Middleware = defineProperty((_, next) => next(), Symbol.for('noParseBody'), true)
+
+    ctx.server.all(path + '/v1/internal/:path(.+)', marker, async (koa) => {
+      const url = new URL(`internal:${koa.params.path}`)
+      for (const [key, value] of Object.entries(koa.query)) {
+        for (const item of makeArray(value)) {
+          url.searchParams.append(key, item)
+        }
       }
 
-      const name = camelCase(koa.params.name)
-      if (!bot.internal?.[name]) {
-        koa.body = 'method not found'
-        koa.status = 404
-        return
+      const headers = new Headers()
+      for (const [key, value] of Object.entries(koa.headers)) {
+        if (FILTER_HEADERS.includes(key)) continue
+        headers.set(key, value as string)
       }
-      const result = await bot.internal[name](...koa.request.body)
-      koa.body = result
-      koa.status = 200
+
+      const buffers: any[] = []
+      for await (const chunk of koa.req) {
+        buffers.push(chunk)
+      }
+      const body = Binary.fromSource(Buffer.concat(buffers))
+      const response = await ctx.satori.handleInternalRoute(koa.method as any, url, headers, body)
+      for (const [key, value] of response.headers ?? new Headers()) {
+        koa.set(key, value)
+      }
+      koa.status = response.status
+      koa.body = response.body ? Buffer.from(response.body) : ''
     })
 
     ctx.server.get(path + '/v1/proxy/:url(.+)', async (koa) => {
-      const url = koa.params.url
+      let url: URL
       try {
-        new URL(url)
+        url = new URL(koa.params.url)
       } catch {
         koa.body = 'invalid url'
         koa.status = 400
         return
       }
 
-      const proxyUrls = ctx.bots.flatMap(bot => bot.proxyUrls, 1)
-      if (!proxyUrls.some(proxyUrl => url.startsWith(proxyUrl))) {
+      koa.header['Access-Control-Allow-Origin'] = ctx.server.config.selfUrl || '*'
+      const proxyUrls = [...ctx.satori.proxyUrls]
+      if (!proxyUrls.some(proxyUrl => url.href.startsWith(proxyUrl))) {
         koa.body = 'forbidden'
         koa.status = 403
         return
       }
 
-      koa.header['Access-Control-Allow-Origin'] = ctx.server.config.selfUrl || '*'
-      if (url.startsWith('upload://')) {
-        const { status, statusText, data, headers } = await ctx.satori.download(url.slice(9))
-        koa.status = status
-        for (const [key, value] of headers || new Headers()) {
+      try {
+        koa.body = Readable.fromWeb(await ctx.http.get(url.href, { responseType: 'stream' }))
+      } catch (error) {
+        if (!ctx.http.isError(error) || !error.response) throw error
+        koa.status = error.response.status
+        koa.body = error.response.data
+        for (const [key, value] of error.response.headers) {
           koa.set(key, value)
         }
-        if (status >= 200 && status < 300) {
-          koa.body = data instanceof ReadableStream ? Readable.fromWeb(data) : data
-        } else {
-          koa.body = statusText
-        }
-      } else {
-        try {
-          koa.body = Readable.fromWeb(await ctx.http.get(koa.params.url, { responseType: 'stream' }))
-        } catch (error) {
-          if (!ctx.http.isError(error) || !error.response) throw error
-          koa.status = error.response.status
-          koa.body = error.response.data
-        }
       }
+    })
+
+    ctx.server.all(path + '/v1/admin/:path(.+)', async (koa) => {
+      koa.redirect(`${path}/v1/meta/${koa.params.path}`)
+    })
+
+    ctx.server.post(path + '/v1/meta', async (koa) => {
+      if (checkAuth(koa)) return
+      koa.body = Universal.transformKey(ctx.satori.toJSON(), snakeCase)
+      koa.status = 200
+    })
+
+    ctx.server.post(path + '/v1/meta/webhook.create', async (koa) => {
+      if (checkAuth(koa)) return
+      const webhook: SatoriServer.Webhook = Universal.transformKey(koa.request.body, camelCase)
+      const index = config.webhooks.findIndex(({ url }) => url === webhook.url)
+      if (index === -1) {
+        config.webhooks.push(webhook)
+        ctx.scope.update(config, false)
+      }
+      koa.body = {}
+      koa.status = 200
+    })
+
+    ctx.server.post(path + '/v1/meta/webhook.delete', async (koa) => {
+      if (checkAuth(koa)) return
+      const url = koa.request.body.url
+      const index = config.webhooks.findIndex(webhook => webhook.url === url)
+      if (index !== -1) {
+        config.webhooks.splice(index, 1)
+        ctx.scope.update(config, false)
+      }
+      koa.body = {}
+      koa.status = 200
     })
 
     const buffer: Session[] = []
@@ -191,14 +222,12 @@ class SatoriServer extends Service<SatoriServer.Config> {
           client.authorized = true
           socket.send(JSON.stringify({
             op: Universal.Opcode.READY,
-            body: {
-              logins: transformKey(ctx.bots.map(bot => bot.toJSON()), snakeCase),
-            },
+            body: Universal.transformKey(ctx.satori.toJSON(), snakeCase),
           }))
-          if (!payload.body?.sequence) return
+          if (!payload.body?.sn) return
           for (const session of buffer) {
-            if (session.id <= payload.body.sequence) continue
-            dispatch(socket, transformKey(session.toJSON(), snakeCase))
+            if (session.id <= payload.body.sn) continue
+            dispatch(socket, Universal.transformKey(session.toJSON(), snakeCase))
           }
         } else if (payload.op === Universal.Opcode.PING) {
           socket.send(JSON.stringify({
@@ -216,20 +245,32 @@ class SatoriServer extends Service<SatoriServer.Config> {
       }))
     }
 
-    ctx.on('internal/session', (session) => {
-      const body = transformKey(session.toJSON(), snakeCase)
+    function sendEvent(opcode: Universal.Opcode, body: any) {
       for (const socket of layer.clients) {
         if (!socket[kClient]?.authorized) continue
         dispatch(socket, body)
       }
       for (const webhook of config.webhooks) {
         if (!webhook.enabled) continue
-        ctx.http.post(webhook.endpoint, body, {
-          headers: webhook.token ? {
-            Authorization: `Bearer ${webhook.token}`,
-          } : {},
+        ctx.http.post(webhook.url, body, {
+          headers: {
+            'Satori-Opcode': opcode,
+            ...webhook.token ? {
+              'Authorization': `Bearer ${webhook.token}`,
+            } : {},
+          },
         }).catch(logger.warn)
       }
+    }
+
+    ctx.on('internal/session', (session) => {
+      const body = Universal.transformKey(session.toJSON(), snakeCase)
+      sendEvent(Universal.Opcode.EVENT, body)
+    })
+
+    ctx.on('satori/meta', () => {
+      const body = Universal.transformKey(ctx.satori.toJSON(true), snakeCase)
+      sendEvent(Universal.Opcode.META, body)
     })
   }
 
@@ -250,13 +291,13 @@ namespace SatoriServer {
 
   export interface Webhook {
     enabled?: boolean
-    endpoint: string
+    url: string
     token?: string
   }
 
   export const Webhook: Schema<Webhook> = Schema.object({
     enabled: Schema.boolean().default(true),
-    endpoint: Schema.string(),
+    url: Schema.string(),
     token: Schema.string(),
   })
 

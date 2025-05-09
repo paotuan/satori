@@ -1,4 +1,5 @@
 import { Binary, Bot, Context, Dict, h, HTTP, Schema, Time, Universal } from '@satorijs/core'
+import { pathToFileURL } from 'url'
 import * as Telegram from './types'
 import { decodeGuildMember, decodeUser } from './utils'
 import { TelegramMessageEncoder } from './message'
@@ -144,7 +145,7 @@ export class TelegramBot<C extends Context = Context, T extends TelegramBot.Conf
 
   async $getFile(filePath: string) {
     if (this.local) {
-      return await this.ctx.http.file(filePath)
+      return await this.ctx.http.file(pathToFileURL(filePath).href)
     } else {
       return await this.file.file(`/${filePath}`)
     }
@@ -200,6 +201,10 @@ export class TelegramBot<C extends Context = Context, T extends TelegramBot.Conf
 
   async updateCommands(commands: Universal.Command[]) {
     if (!this.config.slash) return
+    commands = commands.filter((command) => {
+      // https://core.telegram.org/bots/api#botcommand
+      return /^[\w-]{1,32}$/g.test(command.name)
+    })
     const result = {} as Record<string, Telegram.BotCommand[]>
     for (const cmd of commands) {
       const { name, description } = cmd
@@ -210,8 +215,10 @@ export class TelegramBot<C extends Context = Context, T extends TelegramBot.Conf
         languages[lang] ||= description[locale]
       }
       for (const lang in languages) {
-        result[lang] ??= []
-        result[lang].push({ command: name, description: languages[lang] })
+        (result[lang] ??= []).push({
+          command: name.toLowerCase().replace(/[^\w]/g, '_'),
+          description: languages[lang],
+        })
       }
     }
     for (const lang in result) {
@@ -222,7 +229,7 @@ export class TelegramBot<C extends Context = Context, T extends TelegramBot.Conf
     }
     await this.internal.setMyCommands({
       commands: commands.map(({ name, description }) => ({
-        command: name,
+        command: name.toLowerCase().replace(/[^\w]/g, '_'),
         description: description[''] || name,
       })),
     })

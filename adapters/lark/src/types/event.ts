@@ -1,22 +1,17 @@
-export interface EventHeader<T extends string> {
-  event_id: string
-  event_type: T
-  create_time: string
-  token: string
-  app_id: string
-  tenant_key: string
+import { Internal } from '../internal'
+
+declare module '../internal' {
+  interface Internal {
+    /**
+     * 获取事件出口 IP
+     * @see https://open.feishu.cn/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-v1/outbound_ip/list
+     */
+    listEventOutboundIp(query?: Pagination): Paginated<string, 'ip_list'>
+  }
 }
 
-export interface Events {}
-export type EventName = keyof Events
-
-// In fact, this is the 2.0 version of the event sent by Lark.
-// And only the 2.0 version has the `schema` field.
-export type EventSkeleton<T extends EventName, Event, Header = EventHeader<T>> = {
-  schema: '2.0'
-  type: T
-  header: Header
-  event: Event
-}
-
-export type AllEvents = Events[EventName]
+Internal.define({
+  '/event/v1/outbound_ip': {
+    GET: { name: 'listEventOutboundIp', pagination: { argIndex: 0, itemsKey: 'ip_list' } },
+  },
+})
