@@ -1,10 +1,15 @@
 {
-  "name": "@satorijs/adapter-discord",
+  "name": "@paotuan/adapter-discord",
   "description": "Discord Adapter for Satorijs",
   "version": "4.5.10",
   "type": "module",
   "main": "lib/index.cjs",
   "typings": "lib/index.d.ts",
+  "scripts": {
+    "build:js": "esbuild src/index.ts --outfile=lib/index.cjs --bundle --sourcemap --sources-content=false --platform=node --external:@satorijs/core --external:./node_modules/* --target=es2022",
+    "build:tsc": "tsc",
+    "build": "yarn run build:js && yarn run build:tsc"
+  },
   "files": [
     "lib",
     "src"
