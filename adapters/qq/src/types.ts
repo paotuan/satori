@@ -168,6 +168,7 @@ export interface GatewayEvents {
   AUDIO_OR_LIVE_CHANNEL_MEMBER_EXIT: Partial<Channel>
   C2C_MESSAGE_CREATE: UserMessage
   GROUP_AT_MESSAGE_CREATE: UserMessage
+  GROUP_MESSAGE_CREATE: UserMessage
   INTERACTION_CREATE: Interaction
   GROUP_ADD_ROBOT: GroupEvent
   GROUP_DEL_ROBOT: GroupEvent
@@ -343,6 +344,7 @@ export namespace Message {
     ARK = 3,
     EMBED = 4,
     MEDIA = 7,
+    QUOTE = 103,
   }
   export interface Ark {
     /** ark 模板 id（需要先申请） */
@@ -509,6 +511,20 @@ export namespace Message {
     }
 
   }
+
+  // https://github.com/tencent-connect/openclaw-qqbot/blob/3eee78922ed0b19af5c4c55f1dfe7d1c848e31f5/src/types.ts#L243-L255
+  export interface MsgElement {
+    /** 消息索引标识 */
+    msg_idx?: string
+    /** 消息类型 */
+    message_type?: Message.Type
+    /** 文本内容 */
+    content?: string
+    /** 附件列表 */
+    attachments?: Attachment[]
+    /** 嵌套消息元素（引用消息场景下可能存在） */
+    msg_elements?: MsgElement[]
+  }
 }
 
 export interface User {
@@ -520,6 +536,11 @@ export interface User {
   union_openid: string
   /** 机器人关联的互联应用的用户信息，与union_openid关联的应用是同一个。如需申请，请联系平台运营人员。 */
   union_user_account: string
+
+  is_you?: boolean
+  scope?: 'all' | 'single'
+  member_openid?: string
+  user_openid?: string
 }
 
 export type CreateGuildRoleParams =
@@ -1269,6 +1290,12 @@ export interface UserMessage {
     source: string
     ext?: string[]
   }
+
+  mentions?: User[]
+  group_openid?: string
+  message_type: Message.Type
+  /** 消息元素列表，引用消息时 [0] 为被引用的原始消息 */
+  msg_elements?: Message.MsgElement[]
 }
 
 export enum ChatType {
