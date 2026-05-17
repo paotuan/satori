@@ -33,7 +33,8 @@ export const decodeGuildMember = (member: QQ.Member): Universal.GuildMember => (
   joinedAt: new Date(member.joined_at).valueOf(),
 })
 
-export const decodeFacetags = (content: string, attachments: QQ.Attachment[] = [], attachedFace: Set<number> = new Set()): h[] => {
+/** 将 <faceType...> 串用 faceId 取 attachments 转成 h.image, 如果没有对应 attachment 则删除 <faceType...> */
+export const decodeGroupMessageContent = (content: string, attachments: QQ.Attachment[] = [], attachedFace: Set<number> = new Set()): h[] => {
   const elements = []
   let lastIndex = 0
 
@@ -104,7 +105,7 @@ export function decodeGroupMessage(
 ) {
   message.id = data.id
   const attachedFace = new Set<number>() // attachments 下标
-  message.elements = decodeFacetags(data.content, data.attachments ?? [], attachedFace)
+  message.elements = decodeGroupMessageContent(data.content, data.attachments ?? [], attachedFace)
 
   for (const mention of data.mentions ?? []) {
     // 这个 id 和 bot selfId 不一样
@@ -117,7 +118,7 @@ export function decodeGroupMessage(
     // msg_elements[0] 无 mentions；有 author, content 会有 <faceType ...>
     const quoted: h[] = []
     const quotedAttached = new Set<number>()
-    quoted.push(...decodeFacetags(data.msg_elements[0].content, data.msg_elements[0].attachments ?? [], quotedAttached))
+    quoted.push(...decodeGroupMessageContent(data.msg_elements[0].content, data.msg_elements[0].attachments ?? [], quotedAttached))
     quoted.push(...decodeAttachments(data.msg_elements[0].attachments ?? [], quotedAttached))
     message.quote = {
       member: {
