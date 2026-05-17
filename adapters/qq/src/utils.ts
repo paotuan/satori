@@ -109,7 +109,8 @@ export function decodeGroupMessage(
 
   for (const mention of data.mentions ?? []) {
     // 这个 id 和 bot selfId 不一样
-    if (mention.is_you) message.elements.unshift(h.at(bot.selfId))
+    if (mention.is_you && mention.scope === 'single') message.elements.unshift(h.at(bot.selfId))
+    else if (mention.scope === 'all') message.elements.push(h('at', { type: 'all' })) // 消息中 <@all> 未删除
     else message.elements.push(h.at(mention.id))
   }
 
