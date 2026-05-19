@@ -536,11 +536,6 @@ export interface User {
   union_openid: string
   /** 机器人关联的互联应用的用户信息，与union_openid关联的应用是同一个。如需申请，请联系平台运营人员。 */
   union_user_account: string
-
-  is_you?: boolean
-  scope?: 'all' | 'single'
-  member_openid?: string
-  user_openid?: string
 }
 
 export type CreateGuildRoleParams =
@@ -1280,19 +1275,30 @@ export interface UserMessage {
   id: string
   author: {
     id: string
+    member_openid: string
     username?: string
+    union_openid: string
+    bot?: boolean
   }
   content: string
   timestamp: string
   group_id: string
-  attachments?: Attachment[] // not listed in document?
+  group_openid?: string
+  attachments?: Attachment[]
   message_scene?: {
     source: string
     ext?: string[]
   }
-
-  mentions?: User[]
-  group_openid?: string
+  mentions?: (
+    {
+      scope: 'single'
+      is_you: boolean
+    } & this['author']
+    | {
+      scope: 'all'
+      is_you: boolean
+    }
+  )[]
   message_type: Message.Type
   /** 消息元素列表，引用消息时 [0] 为被引用的原始消息 */
   msg_elements?: Message.MsgElement[]
