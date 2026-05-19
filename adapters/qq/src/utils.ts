@@ -106,13 +106,24 @@ export function decodeGroupMessage(
   message.id = data.id
   const attachedFace = new Set<number>() // attachments 下标
   message.elements = decodeGroupMessageContent(data.content, data.attachments ?? [], attachedFace)
-
+  const mentionMap = new Map<string, h>()
   for (const mention of data.mentions ?? []) {
     // 这个 id 和 bot selfId 不一样
-    if (mention.is_you && mention.scope === 'single') message.elements.unshift(h.at(bot.selfId))
-    else if (mention.scope === 'all') message.elements.push(h('at', { type: 'all' })) // 消息中 <@all> 未删除
-    else message.elements.push(h.at(mention.id))
+    if (mention.is_you && mention.scope === 'single') mentionMap.set(mention.id, h.at(bot.selfId))
+    else if (mention.scope === 'all') mentionMap.set('all', h.at({ type: 'all' }))
+    else mentionMap.set(mention.id, h.at(mention.id))
   }
+  message.elements = h.transform(message.elements, {
+    text: (attrs) => {
+      return attrs.content.split(/(<@(?:[0-9a-fA-F]{32}|all)>)/g)
+        .filter(Boolean)
+        .map((part) => {
+          const match = part.match(/^<@([0-9a-fA-F]{32}|all)>$/)
+          if (match) return mentionMap.get(match[1]) || h.text(part)
+          return h.text(part)
+        })
+    },
+  })
 
   message.elements.push(...decodeAttachments(data.attachments ?? [], attachedFace))
   if (data.message_type === QQ.Message.Type.QUOTE) {
