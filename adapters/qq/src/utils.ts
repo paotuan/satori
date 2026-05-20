@@ -33,6 +33,70 @@ export const decodeGuildMember = (member: QQ.Member): Universal.GuildMember => (
   joinedAt: new Date(member.joined_at).valueOf(),
 })
 
+/** 将 <faceType...> 串用 faceId 取 attachments 转成 h.image, 如果没有对应 attachment 则删除 <faceType...> */
+export const decodeGroupMessageContent = (content: string, attachments: QQ.Attachment[] = [], attachedFace: Set<number> = new Set()): h[] => {
+  const elements = []
+  let lastIndex = 0
+
+  for (const match of content.matchAll(/<faceType=(\d+),faceId="([^"]*)",ext="([^"]*)">/g)) {
+    const [fullMatch, faceType, faceId, ext] = match
+
+    if (match.index > lastIndex) {
+      elements.push(h.text(content.slice(lastIndex, match.index)))
+    }
+    switch (+faceType) {
+      // 动画表情, 超级QQ秀表情, GIF表情
+      case 6: {
+        const imageAttachment = attachments[+faceId]
+        if (imageAttachment) {
+          elements.push(h.image(imageAttachment.url, {
+            width: imageAttachment.width, height: imageAttachment.height,
+          }))
+          attachedFace.add(+faceId)
+        }
+        break
+      }
+      case 4: // 表情商城, 无 id
+      case 3: // 超级表情
+      case 1: { // 小黄脸
+        let name = ''
+        try {
+          name = JSON.parse(Buffer.from(ext, 'base64').toString()).text
+        } finally {
+          elements.push(h('emoji', {
+            ...faceId ? { id: faceId } : {},
+            name,
+          }))
+        }
+      }
+    }
+    lastIndex = match.index + fullMatch.length
+  }
+  if (lastIndex < content.length) {
+    elements.push(h.text(content.slice(lastIndex)))
+  }
+  return elements
+}
+
+export const decodeAttachments = (attachments: QQ.Attachment[], attachedFace: Set<number> = new Set()): h[] => {
+  const elements = []
+  for (const [index, attachment] of attachments.entries()) {
+    if (attachment.content_type === 'file') {
+      elements.push(h.file(attachment.url, {
+        filename: attachment.filename,
+      }))
+    } else if (attachment.content_type.startsWith('image/')) {
+      if (attachedFace.has(index)) continue
+      elements.push(h.image(attachment.url, { width: attachment.width, height: attachment.height }))
+    } else if (attachment.content_type === 'voice') {
+      elements.push(h.audio(attachment.url))
+    } else if (attachment.content_type.startsWith('video')) {
+      elements.push(h.video(attachment.url, { width: attachment.width, height: attachment.height }))
+    }
+  }
+  return elements
+}
+
 export function decodeGroupMessage(
   bot: QQBot,
   data: QQ.UserMessage,
@@ -40,19 +104,39 @@ export function decodeGroupMessage(
   payload: Universal.MessageLike = message,
 ) {
   message.id = data.id
-  message.elements = []
-  if (data.content.length) message.elements.push(h.text(data.content))
-  for (const attachment of (data.attachments ?? [])) {
-    if (attachment.content_type === 'file') {
-      message.elements.push(h.file(attachment.url, {
-        filename: attachment.filename,
-      }))
-    } else if (attachment.content_type.startsWith('image/')) {
-      message.elements.push(h.image(attachment.url))
-    } else if (attachment.content_type === 'voice') {
-      message.elements.push(h.audio(attachment.url))
-    } else if (attachment.content_type === 'video') {
-      message.elements.push(h.video(attachment.url))
+  const attachedFace = new Set<number>() // attachments 下标
+  message.elements = decodeGroupMessageContent(data.content, data.attachments ?? [], attachedFace)
+  const mentionMap = new Map<string, h>()
+  for (const mention of data.mentions ?? []) {
+    // 这个 id 和 bot selfId 不一样
+    if (mention.is_you && mention.scope === 'single') mentionMap.set(mention.id, h.at(bot.selfId))
+    else if (mention.scope === 'all') mentionMap.set('all', h.at({ type: 'all' }))
+    else mentionMap.set(mention.id, h.at(mention.id))
+  }
+  message.elements = h.transform(message.elements, {
+    text: (attrs) => {
+      return attrs.content.split(/(<@(?:[0-9a-fA-F]{32}|all)>)/g)
+        .filter(Boolean)
+        .map((part) => {
+          const match = part.match(/^<@([0-9a-fA-F]{32}|all)>$/)
+          if (match) return mentionMap.get(match[1]) || h.text(part)
+          return h.text(part)
+        })
+    },
+  })
+
+  message.elements.push(...decodeAttachments(data.attachments ?? [], attachedFace))
+  if (data.message_type === QQ.Message.Type.QUOTE) {
+    // msg_elements[0] 无 mentions；有 author, content 会有 <faceType ...>
+    const quoted: h[] = []
+    const quotedAttached = new Set<number>()
+    quoted.push(...decodeGroupMessageContent(data.msg_elements[0].content, data.msg_elements[0].attachments ?? [], quotedAttached))
+    quoted.push(...decodeAttachments(data.msg_elements[0].attachments ?? [], quotedAttached))
+    message.quote = {
+      member: {
+        nick: data.msg_elements[0].author.username,
+      },
+      elements: quoted,
     }
   }
   message.content = message.elements.join('')
@@ -65,6 +149,7 @@ export function decodeGroupMessage(
   payload.timestamp = new Date(date).valueOf()
   payload.guild = data.group_id && { id: data.group_id }
   payload.user = { id: data.author.id, avatar: `https://q.qlogo.cn/qqapp/${bot.config.id}/${data.author.id}/640` }
+  if (data.author.username) payload.user.name = data.author.username
   return message
 }
 
@@ -122,7 +207,7 @@ export function setupReaction(session: Session, data: QQ.MessageReaction) {
 export async function adaptSession<C extends Context = Context>(bot: QQBot<C>, input: QQ.DispatchPayload) {
   let session = bot.session()
 
-  if (!['GROUP_AT_MESSAGE_CREATE', 'C2C_MESSAGE_CREATE', 'FRIEND_ADD', 'FRIEND_DEL',
+  if (!['GROUP_AT_MESSAGE_CREATE', 'C2C_MESSAGE_CREATE', 'GROUP_MESSAGE_CREATE', 'FRIEND_ADD', 'FRIEND_DEL',
     'GROUP_ADD_ROBOT', 'GROUP_DEL_ROBOT', 'INTERACTION_CREATE'].includes(input.t)) {
     session = bot.guildBot.session()
     session.setInternal(bot.guildBot.platform, input)
@@ -182,6 +267,10 @@ export async function adaptSession<C extends Context = Context>(bot: QQBot<C>, i
     session.isDirect = true
     decodeGroupMessage(bot, input.d, session.event.message = {}, session.event)
     session.channelId = session.userId
+  } else if (input.t === 'GROUP_MESSAGE_CREATE') {
+    session.type = 'message'
+    decodeGroupMessage(bot, input.d, session.event.message = {}, session.event)
+    session.channelId = session.guildId
   } else if (input.t === 'FRIEND_ADD') {
     session.type = 'friend-added'
     session.timestamp = input.d.timestamp

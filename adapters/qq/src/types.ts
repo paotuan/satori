@@ -168,6 +168,7 @@ export interface GatewayEvents {
   AUDIO_OR_LIVE_CHANNEL_MEMBER_EXIT: Partial<Channel>
   C2C_MESSAGE_CREATE: UserMessage
   GROUP_AT_MESSAGE_CREATE: UserMessage
+  GROUP_MESSAGE_CREATE: UserMessage
   INTERACTION_CREATE: Interaction
   GROUP_ADD_ROBOT: GroupEvent
   GROUP_DEL_ROBOT: GroupEvent
@@ -343,6 +344,7 @@ export namespace Message {
     ARK = 3,
     EMBED = 4,
     MEDIA = 7,
+    QUOTE = 103,
   }
   export interface Ark {
     /** ark 模板 id（需要先申请） */
@@ -415,6 +417,39 @@ export namespace Message {
     event_id?: string
     markdown?: Markdown
   }
+  export namespace Stream {
+    export enum InputMode {
+      REPLACE = 'replace',
+    }
+    export enum InputState {
+      NOT_STREAM = 0,
+      GENERATING = 1,
+      DONE = 10,
+    }
+    export enum ContentType {
+      MARKDOWN = 'markdown',
+    }
+    export interface Request {
+      /** 输入模式 */
+      input_mode?: InputMode
+      /** 输入状态 */
+      input_state: InputState
+      /** 内容类型 */
+      content_type: ContentType
+      /** markdown 内容 */
+      content_raw: string
+      /** 事件 ID */
+      event_id: string
+      /** 原始消息 ID */
+      msg_id: string
+      /** 流式消息 ID，首次发送后返回，后续分片需携带 */
+      stream_msg_id?: string
+      /** 递增序号 */
+      msg_seq: number
+      /** 同一条流式会话内的发送索引，从 0 开始，每次发送前递增；新流式会话重新从 0 开始 */
+      index: number
+    }
+  }
   export interface Request {
     /** 文本内容 */
     content?: string
@@ -475,6 +510,24 @@ export namespace Message {
       ttl: number
     }
 
+  }
+
+  // https://github.com/tencent-connect/openclaw-qqbot/blob/3eee78922ed0b19af5c4c55f1dfe7d1c848e31f5/src/types.ts#L243-L255
+  export interface MsgElement {
+    author: {
+      username?: string
+      bot?: boolean
+    }
+    /** 消息索引标识 */
+    msg_idx?: string
+    /** 消息类型 */
+    message_type?: Message.Type
+    /** 文本内容 */
+    content?: string
+    /** 附件列表 */
+    attachments?: Attachment[]
+    /** 嵌套消息元素（引用消息场景下可能存在） */
+    msg_elements?: MsgElement[]
   }
 }
 
@@ -872,12 +925,10 @@ export interface APIPermissionDemand {
 export interface Options {
   id: string
   secret: string
-  token: string
   type: 'public' | 'private'
   /** 是否开启沙箱模式 */
   sandbox?: boolean
   endpoint?: string
-  authType?: 'bot' | 'bearer'
   /** 重连次数 */
   retryTimes?: number
   /** 重连时间间隔，单位 ms */
@@ -1228,11 +1279,33 @@ export interface UserMessage {
   id: string
   author: {
     id: string
+    member_openid: string
+    username?: string
+    union_openid: string
+    bot?: boolean
   }
   content: string
   timestamp: string
   group_id: string
-  attachments?: Attachment[] // not listed in document?
+  group_openid?: string
+  attachments?: Attachment[]
+  message_scene?: {
+    source: string
+    ext?: string[]
+  }
+  mentions?: (
+    {
+      scope: 'single'
+      is_you: boolean
+    } & this['author']
+    | {
+      scope: 'all'
+      is_you: boolean
+    }
+  )[]
+  message_type: Message.Type
+  /** 消息元素列表，引用消息时 [0] 为被引用的原始消息 */
+  msg_elements?: Message.MsgElement[]
 }
 
 export enum ChatType {
