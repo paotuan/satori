@@ -2,6 +2,7 @@ import * as QQ from './types'
 import { Context, Dict, h, MessageEncoder } from '@satorijs/core'
 import { QQBot } from './bot'
 import { QQGuildBot } from './bot/guild'
+import crypto from 'crypto'
 
 export const escapeMarkdown = (val: string) =>
   val
@@ -187,7 +188,7 @@ export class QQGuildMessageEncoder<C extends Context = Context> extends MessageE
   }
 }
 
-const MSG_TIMEOUT = 5 * 60 * 1000 - 2000// 5 mins
+const MSG_TIMEOUT = 5 * 60 * 1000 - 2000 // 5 mins
 
 export class QQMessageEncoder<C extends Context = Context> extends MessageEncoder<C, QQBot<C>> {
   private content: string = ''
@@ -209,7 +210,7 @@ export class QQMessageEncoder<C extends Context = Context> extends MessageEncode
       this.options.session['seq'] ||= 0
       msg_id = this.options.session.messageId
       msg_seq = ++this.options.session['seq']
-    } else if (this.options?.session?.qq['id'] && Date.now() - this.options.session.timestamp < MSG_TIMEOUT) {
+    } else if (this.options?.session?.qq?.['id'] && Date.now() - this.options.session.timestamp < MSG_TIMEOUT) {
       event_id = this.options.session.qq['id']
     }
     if (this.passiveId) msg_id = this.passiveId
@@ -228,7 +229,6 @@ export class QQMessageEncoder<C extends Context = Context> extends MessageEncode
       }
     }
     if (this.attachedFile) {
-      if (!data.content.length) data.content = ' '
       data.media = this.attachedFile
       data.msg_type = QQ.Message.Type.MEDIA
     }
@@ -313,26 +313,42 @@ export class QQMessageEncoder<C extends Context = Context> extends MessageEncode
     if (type === 'img' || type === 'image') file_type = 1
     else if (type === 'video') file_type = 2
     else if (type === 'audio') file_type = 3
+    else if (type === 'file') file_type = 4
     else return
     const data: QQ.Message.File.Request = {
       file_type,
       srv_send_msg: false,
     }
+    let fileData: Buffer | undefined
+    let fileDataBase64: string | undefined
+    let fileSize = 0
     // https://developer.mozilla.org/en-US/docs/Web/HTTP/Basics_of_HTTP/MIME_types/Common_types
     const capture = /^data:([\w/.+-]+);base64,(.*)$/.exec(url)
     if (capture?.[2]) {
-      data.file_data = capture[2]
+      fileDataBase64 = capture[2]
+      fileSize = Buffer.byteLength(fileDataBase64, 'base64')
     } else if (await this.bot.ctx.http.isLocal(url)) {
-      data.file_data = Buffer.from((await this.bot.ctx.http.file(url)).data).toString('base64')
+      const file = await this.bot.ctx.http.file(url)
+      data.file_name = file.filename
+      fileData = Buffer.from(file.data)
+      fileSize = fileData.length
     } else {
       data.url = url
     }
+    if (attrs.title) data.file_name = attrs.title
     let res: QQ.Message.File.Response
     try {
-      if (this.session.isDirect) {
-        res = await this.bot.internal.sendFilePrivate(this.options.session.userId, data)
+      if (fileSize > this.bot.config.uploadThreshold) {
+        res = await this.chunkedUpload(file_type, data.file_name ?? 'unnamed', fileData ?? Buffer.from(fileDataBase64!, 'base64'))
       } else {
-        res = await this.bot.internal.sendFileGuild(this.session.channelId, data)
+        if (fileData || fileDataBase64) {
+          data.file_data = fileDataBase64 ?? fileData.toString('base64')
+        }
+        if (this.session.isDirect) {
+          res = await this.bot.internal.sendFilePrivate(this.options.session.userId, data)
+        } else {
+          res = await this.bot.internal.sendFileGuild(this.session.channelId, data)
+        }
       }
     } catch (e) {
       if (!this.bot.http.isError(e)) throw e
@@ -345,6 +361,53 @@ export class QQMessageEncoder<C extends Context = Context> extends MessageEncode
     }
     this.retry = false
     return res
+  }
+
+  async chunkedUpload(
+    fileType: QQ.Message.File.Type,
+    fileName: string,
+    fileData: Uint8Array,
+    send?: boolean,
+  ) {
+    const md5 = crypto.createHash('md5').update(fileData).digest('hex')
+    const sha1 = crypto.createHash('sha1').update(fileData).digest('hex')
+    let uploadInfo: QQ.Message.File.UploadPrepareResponse
+    if (this.session.isDirect) {
+      uploadInfo = await this.bot.internal.uploadPreparePrivate(this.options.session.userId, {
+        file_type: fileType, file_size: fileData.length, file_name: fileName, md5, sha1,
+      })
+    } else {
+      uploadInfo = await this.bot.internal.uploadPrepareGuild(this.session.channelId, {
+        file_type: fileType, file_size: fileData.length, file_name: fileName, md5, sha1,
+      })
+    }
+    const blockSize = +uploadInfo.block_size
+    for (const part of uploadInfo.parts) {
+      const buffer = fileData.subarray((part.index - 1) * blockSize, part.index * blockSize)
+      await this.bot.ctx.http.put(part.presigned_url, buffer)
+      const data: QQ.Message.File.UploadPartFinishRequest = {
+        upload_id: uploadInfo.upload_id,
+        part_index: part.index,
+        block_size: buffer.length,
+        md5: crypto.createHash('md5').update(buffer).digest('hex'),
+      }
+      if (this.session.isDirect) {
+        await this.bot.internal.uploadPartFinishPrivate(this.options.session.userId, data)
+      } else {
+        await this.bot.internal.uploadPartFinishGuild(this.session.channelId, data)
+      }
+    }
+    if (this.session.isDirect) {
+      return this.bot.internal.sendFilePrivate(this.options.session.userId, {
+        upload_id: uploadInfo.upload_id,
+        srv_send_msg: !!send,
+      })
+    } else {
+      return this.bot.internal.sendFileGuild(this.session.channelId, {
+        upload_id: uploadInfo.upload_id,
+        srv_send_msg: !!send,
+      })
+    }
   }
 
   decodeButton(attrs: Dict, label: string) {
@@ -409,6 +472,11 @@ export class QQMessageEncoder<C extends Context = Context> extends MessageEncode
       const data = await this.sendFile(type, attrs)
       if (data) this.attachedFile = data
       await this.flush() // text can't send with video
+    } else if (type === 'file' && (attrs.src || attrs.url)) {
+      await this.flush()
+      const data = await this.sendFile(type, attrs)
+      if (data) this.attachedFile = data
+      await this.flush()
     } else if (type === 'audio' && (attrs.src || attrs.url)) {
       await this.flush()
       const { data } = await this.bot.ctx.http.file(attrs.src || attrs.url, attrs)

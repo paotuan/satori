@@ -134,7 +134,7 @@ export function decodeGroupMessage(
     quoted.push(...decodeAttachments(data.msg_elements[0].attachments ?? [], quotedAttached))
     message.quote = {
       member: {
-        nick: data.msg_elements[0].author.username,
+        nick: data.msg_elements[0].author?.username,
       },
       elements: quoted,
     }
@@ -150,6 +150,7 @@ export function decodeGroupMessage(
   payload.guild = data.group_id && { id: data.group_id }
   payload.user = { id: data.author.id, avatar: `https://q.qlogo.cn/qqapp/${bot.config.id}/${data.author.id}/640` }
   if (data.author.username) payload.user.name = data.author.username
+  if (data.author.member_role) payload.member = { roles: [{ id: data.author.member_role }] }
   return message
 }
 
@@ -208,7 +209,7 @@ export async function adaptSession<C extends Context = Context>(bot: QQBot<C>, i
   let session = bot.session()
 
   if (!['GROUP_AT_MESSAGE_CREATE', 'C2C_MESSAGE_CREATE', 'GROUP_MESSAGE_CREATE', 'FRIEND_ADD', 'FRIEND_DEL',
-    'GROUP_ADD_ROBOT', 'GROUP_DEL_ROBOT', 'INTERACTION_CREATE'].includes(input.t)) {
+    'GROUP_ADD_ROBOT', 'GROUP_DEL_ROBOT', 'INTERACTION_CREATE', 'GROUP_MEMBER_ADD', 'GROUP_MEMBER_REMOVE'].includes(input.t)) {
     session = bot.guildBot.session()
     session.setInternal(bot.guildBot.platform, input)
   } else {
@@ -324,6 +325,14 @@ export async function adaptSession<C extends Context = Context>(bot: QQBot<C>, i
     // session.timestamp = new Date(input.d.joined_at).valueOf()
     session.timestamp = Date.now()
     session.event.user = decodeUser(input.d.user)
+  } else if (input.t === 'GROUP_MEMBER_ADD' || input.t === 'GROUP_MEMBER_REMOVE') {
+    session.type = {
+      GROUP_MEMBER_ADD: 'guild-member-added',
+      GROUP_MEMBER_REMOVE: 'guild-member-removed',
+    }[input.t]
+    session.guildId = input.d.group_openid
+    session.userId = input.d.member_openid
+    session.timestamp = input.d.timestamp
   } else {
     return
   }

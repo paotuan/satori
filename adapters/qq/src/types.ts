@@ -52,6 +52,11 @@ export enum Intents {
    */
   AUDIO_OR_LIVE_CHANNEL_MEMBER = 1 << 19,
   /**
+   * - GROUP_MEMBER_ADD 成员进群
+   * - GROUP_MEMBER_REMOVE 成员退群
+   */
+  GROUP_MEMBERS = 1 << 24,
+  /**
    * - C2C_MESSAGE_CREATE 用户在单聊发送消息给机器人
    * - GROUP_AT_MESSAGE_CREATE 用户在群聊 @ 机器人发送消息
    */
@@ -170,6 +175,8 @@ export interface GatewayEvents {
   GROUP_AT_MESSAGE_CREATE: UserMessage
   GROUP_MESSAGE_CREATE: UserMessage
   INTERACTION_CREATE: Interaction
+  GROUP_MEMBER_ADD: MemberWithGroup
+  GROUP_MEMBER_REMOVE: MemberWithGroup
   GROUP_ADD_ROBOT: GroupEvent
   GROUP_DEL_ROBOT: GroupEvent
   GROUP_MSG_REJECT: GroupEvent
@@ -497,24 +504,64 @@ export namespace Message {
       AUDIO = 3,
       FILE = 4
     }
-    export interface Request {
+
+    export type Request = {
       file_type: Type
       url?: string
       srv_send_msg: boolean
-      file_data?: unknown
+      file_name?: string
+      file_data?: string
+    } | {
+      upload_id: string
+      srv_send_msg: boolean
     }
 
     export interface Response {
       file_uuid: string
       file_info: string
       ttl: number
+      id: string
     }
 
+    export interface UploadPrepareRequest {
+      file_type: Type
+      file_name: string
+      file_size: number
+      md5: string
+      sha1: string
+      md5_10m?: string
+    }
+
+    export interface UploadPrepareResponse {
+      upload_id: string
+      block_size: string
+      parts: {
+        index: number
+        presigned_url: string
+        block_size: number
+      }[]
+      upload_config: {
+        concurrency: number
+        retry_timeout: number
+        retry_delay: number
+      }
+    }
+
+    export interface UploadPartFinishRequest {
+      upload_id: string
+      part_index: number
+      block_size: number
+      md5: string
+    }
+
+    export interface CompleteUploadRequest {
+      upload_id: string
+    }
   }
 
   // https://github.com/tencent-connect/openclaw-qqbot/blob/3eee78922ed0b19af5c4c55f1dfe7d1c848e31f5/src/types.ts#L243-L255
   export interface MsgElement {
-    author: {
+    author?: {
       username?: string
       bot?: boolean
     }
@@ -1280,6 +1327,7 @@ export interface UserMessage {
   author: {
     id: string
     member_openid: string
+    member_role?: 'owner' | 'admin' | 'member'
     username?: string
     union_openid: string
     bot?: boolean
@@ -1350,6 +1398,12 @@ export interface GroupEvent {
   timestamp: number
   group_openid: string
   op_member_openid: string
+}
+
+export interface MemberWithGroup {
+  timestamp: number
+  group_openid: string
+  member_openid: string
 }
 
 export interface UserEvent {
