@@ -196,6 +196,7 @@ export class QQMessageEncoder<C extends Context = Context> extends MessageEncode
   private passiveSeq: number
   private passiveEventId: string
   private useMarkdown = false
+  private inMarkdown = 0
   private rows: QQ.Button[][] = []
   private attachedFile: QQ.Message.File.Response
   private retry = false
@@ -203,7 +204,10 @@ export class QQMessageEncoder<C extends Context = Context> extends MessageEncode
 
   // 先图后文
   async flush() {
-    if (!this.content.trim() && !this.rows.flat().length && !this.attachedFile) return
+    if (!this.content.trim() && !this.rows.flat().length && !this.attachedFile) {
+      this.reset() // eg: <><qq:markdown></qq:markdown><image ...></>
+      return
+    }
     this.trimButtons()
     let msg_id: string, msg_seq: number, event_id: string
     if (this.options?.session?.messageId && Date.now() - this.options.session.timestamp < MSG_TIMEOUT) {
@@ -232,14 +236,14 @@ export class QQMessageEncoder<C extends Context = Context> extends MessageEncode
       data.media = this.attachedFile
       data.msg_type = QQ.Message.Type.MEDIA
     }
-
     if (this.useMarkdown) {
       data.msg_type = QQ.Message.Type.MARKDOWN
       delete data.content
       data.markdown = {
-        content: escapeMarkdown(this.content) || ' ',
+        content: this.content,
       }
       if (this.rows.length) {
+        data.markdown.content ||= ' '
         data.keyboard = {
           content: {
             rows: this.exportButtons(),
@@ -282,7 +286,12 @@ export class QQMessageEncoder<C extends Context = Context> extends MessageEncode
       }
     }
     await send()
+    this.reset()
+  }
+
+  private reset() {
     this.content = ''
+    this.useMarkdown = false
     this.attachedFile = null
     this.rows = []
     this.retry = false
@@ -452,10 +461,22 @@ export class QQMessageEncoder<C extends Context = Context> extends MessageEncode
     })) as QQ.InlineKeyboardRow[]
   }
 
+  async ensureMarkdown() {
+    if (this.attachedFile) {
+      this.useMarkdown = false
+      await this.flush()
+    }
+    if (!this.useMarkdown) {
+      this.content = escapeMarkdown(this.content)
+      this.useMarkdown = true
+    }
+  }
+
   async visit(element: h) {
     const { type, attrs, children } = element
     if (type === 'text') {
-      this.content += attrs.content
+      this.content += this.useMarkdown && !this.inMarkdown
+        ? escapeMarkdown(attrs.content) : attrs.content
     } else if (type === 'passive') {
       if (attrs.messageId) this.passiveId = attrs.messageId
       if (attrs.seq) this.passiveSeq = Number(attrs.seq)
@@ -525,13 +546,18 @@ export class QQMessageEncoder<C extends Context = Context> extends MessageEncode
       if (!this.content.endsWith('\n')) this.content += '\n'
       await this.render(children)
       if (!this.content.endsWith('\n')) this.content += '\n'
+    } else if (type === 'qq:markdown') {
+      await this.ensureMarkdown()
+      this.inMarkdown++
+      await this.render(children)
+      this.inMarkdown--
     } else if (type === 'button-group') {
-      this.useMarkdown = true
+      await this.ensureMarkdown()
       this.rows.push([])
       await this.render(children)
       this.rows.push([])
     } else if (type === 'button') {
-      this.useMarkdown = true
+      await this.ensureMarkdown()
       const last = this.lastRow()
       last.push(this.decodeButton(attrs, children.join('')))
     } else if (type === 'message') {
