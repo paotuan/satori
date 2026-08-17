@@ -118,6 +118,43 @@ export class QQBot<C extends Context = Context, T extends QQBot.Config = QQBot.C
       await this.internal.deletePrivateMessage(channelId, messageId)
     }
   }
+
+  async getGuild(guildId: string): Promise<Universal.Guild> {
+    const data = await this.internal.getGuildInfo(guildId)
+    return { id: data.group_openid, name: data.group_name }
+  }
+
+  async getGuildMember(guildId: string, userId: string): Promise<Universal.GuildMember> {
+    const data = await this.internal.getGuildMember(guildId, userId)
+    return {
+      user: { id: data.member_openid, name: data.username, avatar: `https://q.qlogo.cn/qqapp/${this.config.id}/${data.member_openid}/640` },
+      name: data.username,
+      roles: [{ id: data.member_role }],
+      joinedAt: new Date(data.joined_at).getTime(),
+    }
+  }
+
+  async muteGuildMember(guildId: string, userId: string, duration: number): Promise<void> {
+    await this.internal.updateRestrictChatSetting(guildId, {
+      members: [{
+        op: duration ? 'add' : 'del',
+        member_openid: userId,
+        mute_expire_at: duration ? new Date(Date.now() + duration).toISOString() : undefined,
+      }],
+    })
+  }
+
+  public guildMemberRequestMap = new Map<string, { guildId: string; userId: string }>()
+  async handleGuildMemberRequest(messageId: string, approve: boolean, comment?: string): Promise<void> {
+    const request = this.guildMemberRequestMap.get(messageId)
+    if (!request) throw new Error('join request not found')
+    await this.internal.approveGuildJoinRequest(request.guildId, request.userId, {
+      op: approve ? 'approve' : 'decline',
+      join_request_id: messageId,
+      reject_reason: comment,
+    })
+    this.guildMemberRequestMap.delete(messageId)
+  }
 }
 
 export namespace QQBot {
@@ -128,6 +165,7 @@ export namespace QQBot {
     protocol: 'websocket' | 'webhook'
     path?: string
     uploadThreshold: number
+    markdownVerifyImage: boolean
   }
 
   export type Config = BaseConfig & (HttpServer.Options | WsClient.Options)
@@ -138,7 +176,7 @@ export namespace QQBot {
       secret: Schema.string().description('机器人密钥。').role('secret'),
       type: Schema.union(['public', 'private'] as const).description('机器人类型。').required(),
       sandbox: Schema.boolean().description('是否开启沙箱模式。').default(false),
-      endpoint: Schema.string().role('link').description('要连接的服务器地址。').default('https://api.sgroup.qq.com/'),
+      endpoint: Schema.string().role('link').description('要连接的服务器地址。').default('https://api.bot.qq.com/'),
       intents: Schema.bitset(QQ.Intents).description('需要订阅的机器人事件。'),
       retryWhen: Schema.array(Number).description('发送消息遇到平台错误码时重试。').default([]),
       protocol: Schema.union(['websocket', 'webhook']).description('选择要使用的协议。').default('websocket'),
@@ -150,6 +188,7 @@ export namespace QQBot {
     Schema.object({
       manualAcknowledge: Schema.boolean().description('手动响应回调消息。').default(false),
       uploadThreshold: Schema.natural().role('ms').description('超过该大小的文件将使用分片上传。').default(3 * 1000 * 1000),
+      markdownVerifyImage: Schema.boolean().description('在 Markdown 图片转存失败时报错。').default(false),
     }).description('高级设置'),
   ] as const)
 }

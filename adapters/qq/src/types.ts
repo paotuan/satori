@@ -177,6 +177,7 @@ export interface GatewayEvents {
   INTERACTION_CREATE: Interaction
   GROUP_MEMBER_ADD: MemberWithGroup
   GROUP_MEMBER_REMOVE: MemberWithGroup
+  GROUP_JOIN_REQUEST: GroupJoinRequest
   GROUP_ADD_ROBOT: GroupEvent
   GROUP_DEL_ROBOT: GroupEvent
   GROUP_MSG_REJECT: GroupEvent
@@ -398,6 +399,8 @@ export namespace Message {
     params?: MarkdownParam[]
     /** 原生 markdown 内容，与 template_id 和 params 参数互斥，参数都传值将报错。 */
     content?: string
+    /** 开启后，当图片资源转存失败时，将中断消息发送并返回失败。 */
+    force_verify_image_resource?: boolean
   }
   export interface MarkdownParam {
     /** markdown 模版 key */
@@ -1394,6 +1397,32 @@ export interface Interaction {
   version: 1
 }
 
+export interface GroupInfo {
+  group_openid: string
+  group_name: string
+  group_finger_memo: string
+  group_class_text: string
+  group_tags: string[]
+  group_member_num: number
+}
+
+export interface GroupBotState {
+  member_openid: string
+  joined_at: string
+  allow_proactive_msg: boolean
+  recv_msg_setting: 'all' | 'only_mention' | 'mention_and_context'
+  member_role: 'owner' | 'admin' | 'member'
+}
+
+export interface GroupMember {
+  member_openid: string
+  username: string
+  member_role: 'owner' | 'admin' | 'member'
+  bot: boolean
+  joined_at: string
+  union_openid: string
+}
+
 export interface GroupEvent {
   timestamp: number
   group_openid: string
@@ -1404,6 +1433,74 @@ export interface MemberWithGroup {
   timestamp: number
   group_openid: string
   member_openid: string
+}
+
+export interface GroupJoinRequest {
+  apply_at: string
+  apply_source: 'self_apply' | 'invited'
+  group_openid: string
+  join_request_id: string
+  member_openid: string
+  invited_by?: string
+  username: string
+  verify_info?: {
+    method: 'verify_message' | 'admin_review_qa'
+    verify_message?: string
+    review_qa_list?: {
+      question: string
+      answer: string
+    }[]
+  }
+  auto_approved?: {
+    strategy_id: string
+  }
+
+  // API额外返回的字段
+  risk_tips?: string
+  union_openid?: string
+  bot?: boolean
+}
+
+export interface ApprovalJoinRequestRequest {
+  op: 'approve' | 'decline'
+  join_request_id?: string
+  reject_reason?: string
+  add_to_member_blacklist?: boolean
+}
+
+export interface RestrictChatSetting {
+  global_rule: {
+    mode: 'none' | 'always' | 'schedule'
+    schedule_rules: {
+      task_id: string
+      start_at: string
+      end_at: string
+      enabled: boolean
+    }[]
+    recurring_rules: {
+      task_id: string
+      weekdays: number[]
+      start_time: string
+      end_time: string
+      enabled: boolean
+    }[]
+  }
+  members: {
+    member_openid: string
+    mute_expire_at: string
+    username: string
+    union_openid: string
+  }[]
+}
+
+interface MemberMuteState {
+  op: 'add' | 'update' | 'del'
+  member_openid: string
+  mute_expire_at?: string
+}
+
+export interface UpdateRestrictChatSettingRequest {
+  members: MemberMuteState[]
 }
 
 export interface UserEvent {
