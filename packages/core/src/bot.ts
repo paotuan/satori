@@ -1,4 +1,4 @@
-import { clone, Dict, pick } from 'cosmokit'
+import { clone, Dict, isNonNullable, pick } from 'cosmokit'
 import { Context, Logger, Service } from 'cordis'
 import h from '@satorijs/element'
 import { Adapter } from './adapter'
@@ -31,15 +31,14 @@ export abstract class Bot<C extends Context = Context, T = any> {
   }
 
   public sn: number
-  public user = {} as User
-  public isBot = true
-  public hidden = false
-  public platform: string
+  public user?: User
+  public platform?: string
   public features: string[]
-  public adapter?: Adapter<C, this>
-  public error?: Error
+  public hidden = false
+  public adapter!: Adapter<C, this>
+  public error: any
   public callbacks: Dict<Function> = {}
-  public logger: Logger
+  public logger!: Logger
 
   public _internalRouter: InternalRouter<C>
 
@@ -47,17 +46,15 @@ export abstract class Bot<C extends Context = Context, T = any> {
   protected context: Context
   protected _status: Status = Status.OFFLINE
 
-  constructor(public ctx: C, public config: T, platform?: string) {
+  constructor(public ctx: C, public config: T, public adapterName: string) {
     this.sn = ++ctx.satori._loginSeq
     this.internal = null
     this._internalRouter = new InternalRouter(ctx)
     this.context = ctx
     ctx.bots.push(this)
     this.context.emit('bot-added', this)
-    if (platform) {
-      this.logger = ctx.logger(platform)
-      this.platform = platform
-    }
+    this.logger = ctx.logger(adapterName)
+    this.platform = adapterName
 
     this.features = Object.entries(Methods)
       .filter(([, value]) => this[value.name])
@@ -72,7 +69,7 @@ export abstract class Bot<C extends Context = Context, T = any> {
     ctx.on('dispose', () => this.dispose())
 
     ctx.on('interaction/button', (session) => {
-      const cb = this.callbacks[session.event.button.id]
+      const cb = this.callbacks[session.event.button!.id]
       if (cb) cb(session)
     })
   }
@@ -90,7 +87,7 @@ export abstract class Bot<C extends Context = Context, T = any> {
   update(login: Login) {
     // make sure `status` is the last property to be assigned
     // so that `login-updated` event can be dispatched after all properties are updated
-    const { status, ...rest } = login
+    const { sn, status, ...rest } = login
     Object.assign(this, rest)
     this.status = status
   }
@@ -131,7 +128,7 @@ export abstract class Bot<C extends Context = Context, T = any> {
 
   online() {
     this.status = Status.ONLINE
-    this.error = null
+    this.error = undefined
   }
 
   offline(error?: Error) {
@@ -145,7 +142,7 @@ export abstract class Bot<C extends Context = Context, T = any> {
     try {
       await this.context.parallel('bot-connect', this)
       await this.adapter?.connect(this)
-    } catch (error) {
+    } catch (error: any) {
       this.offline(error)
     }
   }
@@ -193,12 +190,12 @@ export abstract class Bot<C extends Context = Context, T = any> {
 
   async createMessage(channelId: string, content: h.Fragment, referrer?: any, options?: SendOptions) {
     const { MessageEncoder } = this.constructor as typeof Bot
-    return new MessageEncoder(this, channelId, referrer, options).send(content)
+    return new MessageEncoder!(this, channelId, referrer, options).send(content)
   }
 
   async sendMessage(channelId: string, content: h.Fragment, referrer?: any, options?: SendOptions) {
     const messages = await this.createMessage(channelId, content, referrer, options)
-    return messages.map(message => message.id)
+    return messages.map(message => message.id).filter(isNonNullable)
   }
 
   async sendPrivateMessage(userId: string, content: h.Fragment, guildId?: string, options?: SendOptions) {
@@ -246,10 +243,8 @@ export abstract class Bot<C extends Context = Context, T = any> {
 
   toJSON(): Login {
     return clone({
-      ...pick(this, ['sn', 'platform', 'selfId', 'status', 'hidden', 'features']),
-      // make sure `user.id` is present
-      user: this.user.id ? this.user : undefined,
-      adapter: this.platform,
+      ...pick(this, ['sn', 'user', 'platform', 'selfId', 'status', 'hidden', 'features']),
+      adapter: this.adapterName,
     })
   }
 

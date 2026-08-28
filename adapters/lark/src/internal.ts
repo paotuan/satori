@@ -1,4 +1,4 @@
-import { Dict, HTTP, makeArray } from '@satorijs/core'
+import { Context, Dict, HTTP, makeArray } from '@satorijs/core'
 import { LarkBot } from './bot'
 
 export interface Internal {}
@@ -10,11 +10,10 @@ export interface BaseResponse {
   msg: string
 }
 
-export type Paginated<T = any, ItemsKey extends string = 'items', TokenKey extends string = 'page_token'> =
+export type Paginated<T = any, ItemsKey extends string = 'items'> =
   & Promise<
     & { [K in ItemsKey]: T[] }
-    & { [K in TokenKey]?: string }
-    & { has_more: boolean }
+    & { page_token?: string; has_more: boolean }
   >
   & AsyncIterableIterator<T>
 
@@ -34,18 +33,27 @@ export interface InternalRoute {
   type?: 'raw-json' | 'binary'
 }
 
-export class Internal {
-  constructor(private bot: LarkBot) {}
+export class Internal<C extends Context = Context> {
+  constructor(bot: LarkBot<C>, tree = Internal._tree) {
+    return new Proxy(this, {
+      get: (target, prop) => {
+        if (typeof prop === 'symbol') return Reflect.get(target, prop)
+        const value = tree[prop]
+        if (typeof value === 'function') return value.bind(bot)
+        if (value) return new Internal(bot, value)
+      },
+    })
+  }
 
-  private _assertResponse(response: HTTP.Response<BaseResponse>) {
+  private static _assertResponse(bot: LarkBot, response: HTTP.Response<BaseResponse>) {
     if (!response.data.code) return
-    this.bot.logger.debug('response: %o', response.data)
+    bot.logger.debug('response: %o', response.data)
     const error = new HTTP.Error(`request failed`)
     error.response = response
     throw error
   }
 
-  private _buildData(arg: object, options: InternalRoute) {
+  private static _buildData(arg: object, options: InternalRoute) {
     if (options.multipart) {
       const form = new FormData()
       for (const [key, value] of Object.entries(arg)) {
@@ -61,6 +69,8 @@ export class Internal {
     }
   }
 
+  private static _tree: Dict = Object.create(null)
+
   static define(routes: Dict<Partial<Record<HTTP.Method, string | InternalRoute>>>) {
     for (const path in routes) {
       for (const key in routes[path]) {
@@ -70,7 +80,7 @@ export class Internal {
             route = { name: route }
           }
 
-          const impl = async function (this: Internal, ...args: any[]) {
+          const impl = async function (bot: LarkBot, ...args: any[]) {
             const raw = args.join(', ')
             const url = path.replace(/\{([^}]+)\}/g, () => {
               if (!args.length) throw new Error(`too few arguments for ${path}, received ${raw}`)
@@ -81,10 +91,10 @@ export class Internal {
               if (method === 'GET' || method === 'DELETE') {
                 config.params = args[0]
               } else {
-                config.data = this._buildData(args[0], route)
+                config.data = Internal._buildData(args[0], route)
               }
             } else if (args.length === 2 && method !== 'GET' && method !== 'DELETE') {
-              config.data = this._buildData(args[0], route)
+              config.data = Internal._buildData(args[0], route)
               config.params = args[1]
             } else if (args.length > 1) {
               throw new Error(`too many arguments for ${path}, received ${raw}`)
@@ -92,8 +102,8 @@ export class Internal {
             if (route.type === 'binary') {
               config.responseType = 'arraybuffer'
             }
-            const response = await this.bot.http(method, url, config)
-            this._assertResponse(response)
+            const response = await bot.http(method, url, config)
+            Internal._assertResponse(bot, response)
             if (route.type === 'raw-json' || route.type === 'binary') {
               return response.data
             } else {
@@ -101,12 +111,18 @@ export class Internal {
             }
           }
 
-          Internal.prototype[route.name] = function (this: Internal, ...args: any[]) {
+          let root = Internal._tree
+          const parts = route.name.split('.')
+          const lastPart = parts.pop()!
+          for (const part of parts) {
+            root = root[part] ??= Object.create(null)
+          }
+          root[lastPart] = function (this: LarkBot, ...args: any[]) {
             let promise: Promise<any> | undefined
             const result = {} as Paginated
             for (const key of ['then', 'catch', 'finally']) {
               result[key] = (...args2: any[]) => {
-                return (promise ??= impl.apply(this, args))[key](...args2)
+                return (promise ??= impl(this, ...args))[key](...args2)
               }
             }
 
@@ -114,23 +130,24 @@ export class Internal {
               const { argIndex, itemsKey = 'items', tokenKey = 'page_token' } = route.pagination
               const iterArgs = [...args]
               iterArgs[argIndex] = { ...args[argIndex] }
-              let pagination: { data: any[]; next?: any } | undefined
+              type Pagination = { data: any[]; next?: any }
+              let pagination: Pagination | undefined
               result.next = async function () {
-                pagination ??= await this[Symbol.for('satori.pagination')]()
+                pagination ??= await this[Symbol.for('satori.pagination')]() as Pagination
                 if (pagination.data.length) return { done: false, value: pagination.data.shift() }
                 if (!pagination.next) return { done: true, value: undefined }
-                pagination = await this[Symbol.for('satori.pagination')]()
+                pagination = await this[Symbol.for('satori.pagination')]() as Pagination
                 return this.next()
               }
               result[Symbol.asyncIterator] = function () {
                 return this
               }
               result[Symbol.for('satori.pagination')] = async () => {
-                const data = await impl.apply(this, iterArgs)
+                const data = await impl(this, ...iterArgs)
                 iterArgs[argIndex].page_token = data[tokenKey]
                 return {
                   data: data[itemsKey],
-                  next: data.has_more ? iterArgs : undefined,
+                  next: data[tokenKey] ? iterArgs : undefined,
                 }
               }
             }

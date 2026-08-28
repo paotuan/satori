@@ -1,8 +1,9 @@
 import crypto from 'crypto'
 import { Context, h, pick, Session, Universal } from '@satorijs/core'
 import { LarkBot } from './bot'
-import { GetImChatResponse, ListChat, Message, User } from './types'
+import { Im, ListChat, Message, User } from './types'
 import { MessageContent } from './content'
+import { hyphenate } from 'cosmokit'
 
 export interface EventHeader<K extends keyof Events> {
   event_id: string
@@ -168,7 +169,12 @@ export function adaptSender(sender: Sender, session: Session): Session {
   return session
 }
 
-export async function adaptMessage(bot: LarkBot, data: Events['im.message.receive_v1'], session: Session, details = true): Promise<Session> {
+export async function adaptMessage<C extends Context = Context>(
+  bot: LarkBot<C>,
+  data: Events['im.message.receive_v1'],
+  session: Session,
+  details = true,
+): Promise<Session> {
   const json = JSON.parse(data.message.content)
   const content: (string | h)[] = []
   switch (data.message.message_type) {
@@ -182,11 +188,13 @@ export async function adaptMessage(bot: LarkBot, data: Events['im.message.receiv
       // Lark's `at` Element would be `@user_id` in text
       text.split(' ').forEach((word) => {
         if (word.startsWith('@')) {
-          const mention = data.message.mentions.find((mention) => mention.key === word)
-          content.push(h.at(mention.id.open_id, { name: mention.name }))
-        } else {
-          content.push(word)
+          const mention = data.message.mentions.find((mention) => mention.key === word)!
+          if (mention) {
+            content.push(h.at(mention.id.open_id, { name: mention.name }))
+            return
+          }
         }
+        content.push(word)
       })
       break
     }
@@ -212,7 +220,8 @@ export async function adaptMessage(bot: LarkBot, data: Events['im.message.receiv
   session.guildId = data.message.chat_id
   session.content = content.map((c) => c.toString()).join(' ')
 
-  if (data.message.parent_id && details) {
+  // thread messages should not be treated as quotes
+  if (data.message.parent_id && !data.message.thread_id && details) {
     session.quote = await bot.getMessage(session.channelId, data.message.parent_id, false)
   }
   return session
@@ -250,33 +259,56 @@ export async function adaptSession<C extends Context>(bot: LarkBot<C>, body: Eve
       if (body.event.action.value?._satori_type === 'command') {
         session.type = 'interaction/command'
         let content = body.event.action.value.content
-        const args = [], options = Object.create(null)
-        for (const [key, value] of Object.entries(body.event.action.form_value ?? {})) {
-          if (+key * 0 === 0) {
-            args[+key] = value
+        const args: any[] = [], options = Object.create(null)
+        const setOption = (key: string, value: any) => {
+          if (key in options) {
+            options[key] += ',' + value
           } else {
             options[key] = value
           }
         }
-        for (let i = 0; i < args.length; ++i) {
-          if (i in args) {
-            content += ` ${args[i]}`
+        for (const [key, value] of Object.entries(body.event.action.form_value ?? {})) {
+          if (key.startsWith('@@')) {
+            if (value === false) continue
+            args.push(key.slice(2))
+          } else if (key.startsWith('@')) {
+            if (value === false) continue
+            const [_key] = key.slice(1).split('=', 1)
+            setOption(_key, key.slice(2 + _key.length))
+          } else if (+key * 0 === 0) {
+            args[+key] = value
           } else {
-            content += ` ''`
+            setOption(key, value)
           }
         }
+        const toArg = (value: any) => {
+          if (typeof value === 'string') {
+            return `'${value}'`
+          } else { // number, boolean
+            return value
+          }
+        }
+        for (let i = 0; i < args.length; ++i) {
+          content += ` ${toArg(args[i])}`
+        }
         for (const [key, value] of Object.entries(options)) {
-          content += ` --${key} ${value}`
+          if (value === true) {
+            content += ` --${hyphenate(key)} 1`
+          } else if (value === false) {
+            content += ` --${hyphenate(key)} 0`
+          } else {
+            content += ` --${hyphenate(key)} ${toArg(value)}`
+          }
         }
         if (body.event.action.input_value) {
-          content += ` ${body.event.action.input_value}`
+          content += ` ${toArg(body.event.action.input_value)}`
         }
         session.content = content
         session.messageId = body.event.context.open_message_id
         session.channelId = body.event.context.open_chat_id
         session.guildId = body.event.context.open_chat_id
         session.userId = body.event.operator.open_id
-        const chat = await bot.internal.getImChat(session.channelId)
+        const chat = await bot.internal.im.chat.get(session.channelId)
         // TODO: add channel data
         session.isDirect = chat.chat_mode === 'p2p'
       }
@@ -286,8 +318,8 @@ export async function adaptSession<C extends Context>(bot: LarkBot<C>, body: Eve
 }
 
 // TODO: This function has many duplicated code with `adaptMessage`, should refactor them
-export async function decodeMessage(bot: LarkBot, body: Message, details = true): Promise<Universal.Message> {
-  const json = JSON.parse(body.body.content)
+export async function decodeMessage<C extends Context = Context>(bot: LarkBot<C>, body: Message, details = true): Promise<Universal.Message> {
+  const json = JSON.parse(body.body!.content)
   const content: h[] = []
   switch (body.msg_type) {
     case 'text': {
@@ -300,46 +332,48 @@ export async function decodeMessage(bot: LarkBot, body: Message, details = true)
       // Lark's `at` Element would be `@user_id` in text
       text.split(' ').forEach((word) => {
         if (word.startsWith('@')) {
-          const mention = body.mentions.find((mention) => mention.key === word)
-          content.push(h.at(mention.id, { name: mention.name }))
-        } else {
-          content.push(h.text(word))
+          const mention = body.mentions!.find((mention) => mention.key === word)!
+          if (mention) {
+            content.push(h.at(mention.id, { name: mention.name }))
+            return
+          }
         }
+        content.push(h.text(word))
       })
       break
     }
     case 'image':
-      content.push(h.image(bot.getResourceUrl('image', body.message_id, json.image_key)))
+      content.push(h.image(bot.getResourceUrl('image', body.message_id!, json.image_key)))
       break
     case 'audio':
-      content.push(h.audio(bot.getResourceUrl('file', body.message_id, json.file_key)))
+      content.push(h.audio(bot.getResourceUrl('file', body.message_id!, json.file_key)))
       break
     case 'media':
-      content.push(h.video(bot.getResourceUrl('file', body.message_id, json.file_key), {
+      content.push(h.video(bot.getResourceUrl('file', body.message_id!, json.file_key), {
         poster: json.image_key,
       }))
       break
     case 'file':
-      content.push(h.file(bot.getResourceUrl('file', body.message_id, json.file_key)))
+      content.push(h.file(bot.getResourceUrl('file', body.message_id!, json.file_key)))
       break
   }
 
   return {
-    timestamp: +body.update_time,
-    createdAt: +body.create_time,
-    updatedAt: +body.update_time,
+    timestamp: +body.update_time!,
+    createdAt: +body.create_time!,
+    updatedAt: +body.update_time!,
     id: body.message_id,
     messageId: body.message_id,
     user: {
-      id: body.sender.id,
+      id: body.sender!.id,
     },
     channel: {
-      id: body.chat_id,
+      id: body.chat_id!,
       type: Universal.Channel.Type.TEXT,
     },
     content: content.map((c) => c.toString()).join(' '),
     elements: content,
-    quote: (body.upper_message_id && details) ? await bot.getMessage(body.chat_id, body.upper_message_id, false) : undefined,
+    quote: (body.upper_message_id && details) ? await bot.getMessage(body.chat_id!, body.upper_message_id, false) : undefined,
   }
 }
 
@@ -355,7 +389,7 @@ export function extractIdType(id: string): ReceiveIdType {
   return 'user_id'
 }
 
-export function decodeChannel(channelId: string, guild: GetImChatResponse): Universal.Channel {
+export function decodeChannel(channelId: string, guild: Im.Chat.GetResponse): Universal.Channel {
   return {
     id: channelId,
     type: Universal.Channel.Type.TEXT,
@@ -366,7 +400,7 @@ export function decodeChannel(channelId: string, guild: GetImChatResponse): Univ
 
 export function decodeGuild(guild: ListChat): Universal.Guild {
   return {
-    id: guild.chat_id,
+    id: guild.chat_id!,
     name: guild.name,
     avatar: guild.avatar,
   }
@@ -374,7 +408,7 @@ export function decodeGuild(guild: ListChat): Universal.Guild {
 
 export function decodeUser(user: User): Universal.User {
   return {
-    id: user.open_id,
+    id: user.open_id!,
     avatar: user.avatar?.avatar_origin,
     isBot: false,
     name: user.name,
