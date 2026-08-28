@@ -3,6 +3,7 @@ import { QQBot } from '.'
 import { decodeChannel, decodeGuild, decodeGuildMember, decodeMessage, decodeUser } from '../utils'
 import { GuildInternal } from '../internal'
 import { QQGuildMessageEncoder } from '../message'
+import * as QQ from '../types'
 
 export namespace QQGuildBot {
   export interface Config {
@@ -59,6 +60,23 @@ export class QQGuildBot<C extends Context = Context> extends Bot<C> {
     return decodeChannel(channel)
   }
 
+  async createChannel(guildId: string, data: Partial<Universal.Channel>) {
+    const channel = await this.internal.createGuildChannel(guildId, {
+      name: data.name,
+      type: data.type === Universal.Channel.Type.TEXT ? QQ.ChannelType.TEXT
+        : data.type === Universal.Channel.Type.CATEGORY ? QQ.ChannelType.GROUP
+          : data.type === Universal.Channel.Type.VOICE ? QQ.ChannelType.VOICE
+            : QQ.ChannelType.TEXT,
+      parent_id: data.parentId,
+      position: data.position,
+      sub_type: 0,
+      private_type: 0,
+      speak_permission: 1,
+      private_user_ids: [],
+    })
+    return decodeChannel(channel)
+  }
+
   async getGuildMemberList(guildId: string, next?: string): Promise<Universal.List<Universal.GuildMember>> {
     const members = await this.internal.getGuildMembers(guildId, {
       limit: 400,
@@ -82,8 +100,8 @@ export class QQGuildBot<C extends Context = Context> extends Bot<C> {
     })
   }
 
-  async getReactionList(channelId: string, messageId: string, emoji: string, next?: string): Promise<Universal.List<Universal.User>> {
-    const [type, id] = emoji.split(':')
+  async getReactionList(channelId: string, messageId: string, emojiId: string, next?: string): Promise<Universal.List<Universal.User>> {
+    const [type, id] = emojiId.split(':')
     const { users, cookie } = await this.internal.getReactions(channelId, messageId, type, id, {
       limit: 50,
       cookie: next,
@@ -91,19 +109,19 @@ export class QQGuildBot<C extends Context = Context> extends Bot<C> {
     return { next: cookie, data: users.map(decodeUser) }
   }
 
-  async createReaction(channelId: string, messageId: string, emoji: string) {
-    const [type, id] = emoji.split(':')
+  async createReaction(channelId: string, messageId: string, emojiId: string) {
+    const [type, id] = emojiId.split(':')
     await this.internal.createReaction(channelId, messageId, type, id)
   }
 
-  async deleteReaction(channelId: string, messageId: string, emoji: string) {
-    const [type, id] = emoji.split(':')
+  async deleteReaction(channelId: string, messageId: string, emojiId: string) {
+    const [type, id] = emojiId.split(':')
     await this.internal.deleteReaction(channelId, messageId, type, id)
   }
 
   async getMessage(channelId: string, messageId: string): Promise<Universal.Message> {
     const r = await this.internal.getMessage(channelId, messageId)
-    return decodeMessage(this, r)
+    return decodeMessage(this, r.message)
   }
 
   async deleteMessage(channelId: string, messageId: string) {
