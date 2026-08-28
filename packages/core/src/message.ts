@@ -1,6 +1,6 @@
 import { Context } from 'cordis'
 import { Bot } from './bot'
-import { Message, SendOptions } from '@satorijs/protocol'
+import { Channel, Message, SendOptions } from '@satorijs/protocol'
 import h from '@satorijs/element'
 
 class AggregateError extends Error {
@@ -12,7 +12,7 @@ class AggregateError extends Error {
 export abstract class MessageEncoder<C extends Context = Context, B extends Bot<C> = Bot<C>> {
   public errors: Error[] = []
   public results: Message[] = []
-  public session: C[typeof Context.session]
+  public session!: C[typeof Context.session]
 
   constructor(public bot: B, public channelId: string, public referrer?: any, public options: SendOptions = {}) {}
 
@@ -33,12 +33,12 @@ export abstract class MessageEncoder<C extends Context = Context, B extends Bot<
   async send(content: h.Fragment) {
     this.session = this.bot.session({
       type: 'send',
-      channel: { id: this.channelId, ...this.options.session?.event.channel },
+      channel: { id: this.channelId, ...this.options.session?.event.channel } as Channel,
       guild: this.options.session?.event.guild,
     })
     for (const key in this.options.session || {}) {
       if (key === 'id' || key === 'event') continue
-      this.session[key] = this.options.session[key]
+      this.session[key] = this.options.session![key]
     }
     await this.prepare()
     const session = this.options.session ?? this.session

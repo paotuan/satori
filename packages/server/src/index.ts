@@ -4,7 +4,7 @@ import {} from '@cordisjs/plugin-server'
 import WebSocket from 'ws'
 import { Readable } from 'node:stream'
 import { readFile } from 'node:fs/promises'
-import { Middleware, ParameterizedContext } from 'koa'
+import { DefaultState, Middleware, ParameterizedContext } from 'koa'
 
 declare module '@satorijs/core' {
   interface Satori {
@@ -27,6 +27,29 @@ const FILTER_HEADERS = [
   'x-platform',
 ]
 
+// Hop-by-hop headers (RFC 7230 §6.1) plus framing/identity headers that Node's
+// HTTP layer manages itself. Forwarding these from an upstream response would
+// confuse the outgoing response (e.g. `transfer-encoding: chunked` paired with
+// a fixed-length body causes the client to wait forever for a terminator).
+// `content-encoding` is dropped because fetch transparently decodes the upstream
+// body, so the bytes we forward are already plain — keeping the header would
+// make the downstream client try to decode plain bytes as gzip/br.
+const FILTER_RESPONSE_HEADERS = [
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+  'content-encoding',
+  'content-length',
+  // `server` is dropped to avoid leaking upstream identity and to avoid
+  // misrepresenting this hop's actual server software.
+  'server',
+]
+
 class SatoriServer extends Service<SatoriServer.Config> {
   static inject = ['server', 'http']
 
@@ -35,7 +58,7 @@ class SatoriServer extends Service<SatoriServer.Config> {
     const logger = ctx.logger('server')
     const path = sanitize(config.path)
 
-    function checkAuth(koa: ParameterizedContext) {
+    function checkAuth<T>(koa: ParameterizedContext<DefaultState, T, unknown>) {
       if (!config.token) return
       if (koa.request.headers.authorization !== `Bearer ${config.token}`) {
         koa.body = 'invalid token'
@@ -121,6 +144,7 @@ class SatoriServer extends Service<SatoriServer.Config> {
       const body = Binary.fromSource(Buffer.concat(buffers))
       const response = await ctx.satori.handleInternalRoute(koa.method as any, url, headers, body)
       for (const [key, value] of response.headers ?? new Headers()) {
+        if (FILTER_RESPONSE_HEADERS.includes(key.toLowerCase())) continue
         koa.set(key, value)
       }
       koa.status = response.status
