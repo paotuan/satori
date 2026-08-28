@@ -1,7 +1,7 @@
 {
   "name": "@satorijs/adapter-wecom",
   "description": "Wecom Adapter for Satorijs",
-  "version": "2.4.3-alpha.0",
+  "version": "2.5.0",
   "type": "module",
   "main": "lib/index.cjs",
   "typings": "lib/index.d.ts",
@@ -27,16 +27,18 @@
     "chatbot",
     "satori",
     "im",
-    "chat"
+    "chat",
+    "微信",
+    "企业微信"
   ],
   "devDependencies": {
-    "@cordisjs/plugin-server": "^0.2.5",
-    "@satorijs/core": "^4.5.0",
+    "@cordisjs/plugin-server": "^0.2.9",
+    "@satorijs/core": "^4.6.0",
     "@types/xml2js": "^0.4.14",
     "cordis": "^3.18.1"
   },
   "peerDependencies": {
-    "@satorijs/core": "^4.5.0"
+    "@satorijs/core": "^4.6.0"
   },
   "dependencies": {
     "@wecom/crypto": "^1.0.1",
