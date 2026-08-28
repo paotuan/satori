@@ -1,7 +1,7 @@
 /* eslint-disable no-console */
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { capitalize } from 'cosmokit'
+import { camelize, capitalize } from 'cosmokit'
 import pMap from 'p-map'
 import dedent from 'dedent'
 
@@ -11,11 +11,16 @@ interface Response<T = any> {
   data: T
 }
 
-export interface ApiMeta {
+export const enum MetaType {
+  API = 1,
+  EVENT = 2,
+}
+
+export interface Meta {
   Name: string
   Project: string
   Resource: string
-  Type: 1
+  Type: MetaType
   Version: string
 }
 
@@ -27,13 +32,29 @@ interface Api {
   fullPath: string
   id: string
   isCharge: boolean
-  meta: ApiMeta
+  meta: Meta
   name: string
   orderMark: string
   supportAppTypes: string[]
   tags: string[]
   updateTime: number
   url: string
+}
+
+interface Event {
+  bizTag: string
+  detail: string
+  fullDose: boolean
+  fullPath: string
+  id: string
+  meta: Meta
+  name: string
+  orderMark: string
+  supportAppTypes: string[]
+  tags: string[]
+  updateTime: number
+  url: string
+  version: string
 }
 
 interface BizInfo {
@@ -43,6 +64,11 @@ interface BizInfo {
 
 interface ApiList {
   apis: Api[]
+  bizInfos: BizInfo[]
+}
+
+interface EventList {
+  events: Event[]
   bizInfos: BizInfo[]
 }
 
@@ -58,11 +84,15 @@ export interface Schema {
   required: boolean
   properties?: Schema[]
   items?: Schema
-  options?: {
-    name: string
-    value: string
-    description: string
-  }[]
+  keyType?: Schema
+  valueType?: Schema
+  options?: SchemaOption[]
+}
+
+export interface SchemaOption {
+  name: string
+  value: string
+  description: string
 }
 
 interface ApiDetail {
@@ -109,7 +139,7 @@ async function request<T>(url: string) {
   return body.data
 }
 
-async function getDetail(api: Api) {
+async function getApiDetail(api: Api) {
   const path = new URL(`../temp/api/${api.id}.json`, import.meta.url)
   try {
     return JSON.parse(await readFile(path, 'utf8')) as ApiDetail
@@ -125,26 +155,86 @@ async function getDetail(api: Api) {
   return data
 }
 
-function toHump(name: string) {
-  return name.replace(/[\_\.](\w)/g, function (all, letter) {
-    return letter.toUpperCase()
-  })
+function formatEnum(options: SchemaOption[], type: string): string {
+  if (!options.length) return ''
+  const quote = type === 'string' ? "'" : ''
+  return options.map((option) => {
+    const lines = option.description
+      .replace(/<br>/g, '\n')
+      .split('\n')
+      .map(line => line
+        .replace(/\/ssl:ttdoc\//g, 'https://open.feishu.cn/document/')
+        .trim())
+      .filter(line => line)
+    const desc = lines.length > 1
+      ? `  /**\n${lines.map(line => `   * ${line}`).join('\n')}\n   */\n`
+      : lines.length === 1
+        ? `  /** ${lines[0]} */\n`
+        : ''
+    return `${desc}  ${capitalize(camelize(option.name))} = ${quote}${option.value}${quote},`
+  }).join('\n') + '\n'
 }
 
-function formatType(schema: Schema, imports: Set<string>, inArray?: boolean) {
-  if (!schema.ref) return _formatType(schema, imports, inArray)
-  const name = capitalize(toHump(schema.ref))
-  imports.add(name)
-  if (refs[name]) return name
+function formatObject(properties: Schema[], parentName: string, project?: Project, ns?: Namespace): string {
+  if (!properties.length) return ''
+  return properties.map((schema) => {
+    const name = parentName ? parentName + capitalize(camelize(schema.name)) : undefined
+    const lines = schema.description
+      .replace(/<br>/g, '\n')
+      .split('\n')
+      .map(line => line
+        .replace(/\/ssl:ttdoc\//g, 'https://open.feishu.cn/document/')
+        .trim())
+      .filter(line => line)
+    const desc = lines.length > 1
+      ? `  /**\n${lines.map(line => `   * ${line}`).join('\n')}\n   */\n`
+      : lines.length === 1
+        ? `  /** ${lines[0]} */\n`
+        : ''
+    return `${desc}  ${schema.name}${schema.required ? '' : '?'}: ${formatType(schema, name!, project, ns, false)}`
+  }).join('\n') + '\n'
+}
+
+function formatType(schema: Schema, name: string, project?: Project, ns?: Namespace, inArray?: boolean) {
+  const prefix = project ? 'Lark.' : ''
+  if (schema.ref) {
+    name = capitalize(camelize(schema.ref.replace(/\./g, '_')))
+    project?.imports.add(name)
+    if (refs[name]) return `${prefix}${name}`
+  }
+  let isEnum = !!((project || schema.ref) && schema.options)
+  if (isEnum) {
+    if (schema.type === 'int') {
+      isEnum = schema.options!.every(v => !/^\d+$/.test(v.name) && /^\w+$/.test(v.name))
+    } else if (schema.type === 'string') {
+      isEnum = !!schema.ref
+    } else {
+      isEnum = false
+    }
+  }
+  if (isEnum) {
+    const decl = `export const enum ${name} {\n${formatEnum(schema.options!, schema.type)}}`
+    if (schema.ref) {
+      refs[name] = decl
+      return `${prefix}${name}`
+    } else {
+      ns!.interfaces.push(decl)
+      return name
+    }
+  }
+  if (!schema.ref) {
+    return _formatType(schema, name, project, ns, inArray)
+  }
   refs[name] = schema.type === 'object' && schema.properties
-    ? `export interface ${name} ${_formatType(schema)}`
-    : `export type ${name} = ${_formatType(schema)}`
-  return name
+    ? `export interface ${name} ${_formatType(schema, name)}`
+    : `export type ${name} = ${_formatType(schema, name)}`
+  return `${prefix}${name}`
 }
 
-function _formatType(schema: Schema, imports = new Set<string>(), inArray?: boolean) {
+function _formatType(schema: Schema, parentName: string, project?: Project, ns?: Namespace, inArray?: boolean) {
   if (schema.type === 'file') return 'Blob'
-  if (schema.type === 'int') {
+  if (schema.type === 'float') return 'number'
+  if (schema.type === 'int' || schema.type === 'int64') {
     if (schema.options) {
       const output = schema.options.map(v => v.value).join(' | ')
       return inArray ? `(${output})` : output
@@ -152,7 +242,6 @@ function _formatType(schema: Schema, imports = new Set<string>(), inArray?: bool
       return 'number'
     }
   }
-  if (schema.type === 'float') return 'number'
   if (schema.type === 'string') {
     if (schema.options) {
       const output = schema.options.map(v => `'${v.value}'`).join(' | ')
@@ -164,107 +253,164 @@ function _formatType(schema: Schema, imports = new Set<string>(), inArray?: bool
   if (schema.type === 'boolean') return 'boolean'
   if (schema.type === 'object') {
     if (!schema.properties) return 'unknown'
-    return `{\n${generateParams(schema.properties, imports)}}`
-  } else if (schema.type === 'list') {
-    return formatType(schema.items!, imports, true) + '[]'
+    return `{\n${formatObject(schema.properties, parentName, project, ns)}}`
   }
+  if (schema.type === 'list') {
+    let name = parentName
+    if (name.endsWith('List')) {
+      name = parentName.slice(0, -4)
+    }
+    return formatType(schema.items!, name, project, ns, true) + '[]'
+  }
+  if (schema.type === 'map') {
+    const key = formatType(schema.keyType!, parentName + 'Key', project, ns)
+    const value = formatType(schema.valueType!, parentName + 'Value', project, ns)
+    return `Record<${key}, ${value}>`
+  }
+  console.log(`unknown type: ${schema.type}`)
   return 'unknown'
 }
 
-function generateParams(properties: Schema[], imports: Set<string>): string {
-  if (!properties.length) return ''
-  const getDesc = (v: Schema) => v.description ? `  /** ${v.description.replace(/\n/g, '').trim()} */\n` : ''
-  return properties.map((schema: Schema) => {
-    return `${getDesc(schema)}  ${schema.name}${schema.required ? '' : '?'}: ${formatType(schema, imports)}`
-  }).join('\n') + '\n'
-}
-
-function getApiName(detail: ApiDetail) {
-  let project = detail.project
-  if (project === 'task' || project === 'drive' || project === 'performance' || project === 'corehr') {
-    project = project + detail.version.toUpperCase()
-  }
-  if (detail.project === detail.resource) {
-    return toHump(`${detail.apiName}.${project}`)
-  } else {
-    return toHump(`${detail.apiName}.${project}.${detail.resource}`)
-  }
+function createInterface(name: string, properties: Schema[], project: Project, ns: Namespace, parent?: string): string {
+  return `export interface ${name}${parent ? ` extends ${parent}` : ''} {\n${formatObject(properties, name, project, ns)}}`
 }
 
 interface Project {
-  methods: string[]
-  requests: string[]
-  responses: string[]
-  internals: string[]
+  namespace: Namespace
   imports: Set<string>
   internalImports: Set<string>
   defines: Record<string, Record<string, string>>
 }
 
+interface Namespace {
+  methods: string[]
+  interfaces: string[]
+  namespaces: Record<string, Namespace>
+}
+
+function formatNamespace(name: string, ns: Namespace): string {
+  return dedent`
+    export namespace ${name} {
+      export interface Methods {
+        __METHODS__
+      }
+
+      __INTERFACES__
+
+      __NAMESPACES__
+    }`
+    .replace('__METHODS__', [
+      ...Object.entries(ns.namespaces).map(([name]) => `${name[0].toLowerCase() + name.slice(1)}: ${name}.Methods`),
+      ...ns.methods.join('\n').split('\n'),
+    ].join('\n    '))
+    .replace('__INTERFACES__', ns.interfaces.join('\n\n').split('\n').join('\n  '))
+    .replace('__NAMESPACES__', Object.entries(ns.namespaces).map(([name, ns]) => {
+      return formatNamespace(name, ns)
+    }).join('\n\n').split('\n').join('\n  '))
+}
+
 async function start() {
   await mkdir(new URL('../temp/api', import.meta.url), { recursive: true })
+  await mkdir(new URL('../temp/event', import.meta.url), { recursive: true })
   await mkdir(new URL('../src/types', import.meta.url), { recursive: true })
+
   // https://open.feishu.cn/document/server-docs/api-call-guide/server-api-list
-  const data = await request<ApiList>('https://open.feishu.cn/api/tools/server-side-api/list')
-  data.apis = data.apis.filter(api => api.meta.Version !== 'old')
-  await writeFile(new URL('../temp/apis.json', import.meta.url), JSON.stringify(data))
-  const details = await pMap(data.apis, getDetail, {
+  let { apis } = await request<ApiList>('https://open.feishu.cn/api/tools/server-side-api/list')
+  apis = apis.filter(api => api.meta.Version !== 'old')
+  await writeFile(new URL('../temp/apis.json', import.meta.url), JSON.stringify(apis))
+  const details = await pMap(apis, getApiDetail, {
     concurrency: 10,
   })
 
+  // https://open.feishu.cn/document/server-docs/event-subscription-guide/event-list
+  let { events } = await request<EventList>('https://open.feishu.cn/api/tools/server-side-event/list')
+  events = events.filter(api => api.meta.Version !== 'old')
+  await writeFile(new URL('../temp/events.json', import.meta.url), JSON.stringify(events))
+
   const projectVersions: Record<string, Set<string>> = {}
-  data.apis.forEach(api => {
+  apis.forEach(api => {
     (projectVersions[api.meta.Project] ??= new Set()).add(api.meta.Version)
   })
   console.log(projectVersions)
 
+  const methods: Record<string, number> = {}
   details.forEach((detail, index) => {
-    const summary = data.apis[index]
+    const routeParts = [
+      detail.project,
+      ...detail.resource.split('.'),
+      detail.apiName,
+    ].map(camelize)
+    if (routeParts[0] === routeParts[1]) routeParts.shift()
+    const route = routeParts.join('.')
+    if (!methods[route] || details[methods[route]].version < detail.version) {
+      methods[route] = index
+    }
+  })
+
+  Object.entries(methods).forEach(([route, index]) => {
+    const detail = details[index]
+    const summary = apis[index]
     const project = projects[detail.project] ||= {
-      methods: [],
-      requests: [],
-      responses: [],
-      internals: [],
+      namespace: {
+        methods: [],
+        interfaces: [],
+        namespaces: {},
+      },
       imports: new Set(),
       internalImports: new Set(['Internal']),
       defines: {},
     }
 
-    const method = getApiName(detail)
+    const method = camelize(detail.apiName)
     const apiType = capitalize(method)
     const args: string[] = []
     const extras: string[] = []
 
+    const parts = detail.resource.split('.').map(name => capitalize(camelize(name)))
+    let ns = project.namespace
+    if (parts[0] === capitalize(camelize(detail.project))) {
+      parts.shift()
+    }
+    for (const part of parts) {
+      ns = ns.namespaces[part] ||= {
+        methods: [],
+        interfaces: [],
+        namespaces: {},
+      }
+    }
+    const lastPart = parts[parts.length - 1] ?? capitalize(camelize(detail.project))
+
     let returnType: string
     let paginationRequest: { queryType?: string } | undefined
     for (const property of detail.request.path?.properties || []) {
-      args.push(`${property.name}: ${formatType(property, project.imports)}`)
+      const name = apiType + capitalize(camelize(property.name))
+      args.push(`${property.name}: ${formatType(property, name, project, ns)}`)
     }
     if (detail.supportFileUpload && detail.request.body?.properties?.length) {
       const name = `${apiType}Form`
       args.push(`form: ${name}`)
-      project.requests.push(`export interface ${name} {\n${generateParams(detail.request.body!.properties, project.imports)}}`)
+      ns.interfaces.push(createInterface(name, detail.request.body!.properties, project, ns))
       extras.push(`multipart: true`)
     } else if (detail.request.body?.properties?.length) {
       const name = `${apiType}Request`
-      project.requests.push(`export interface ${name} {\n${generateParams(detail.request.body.properties, project.imports)}}`)
+      ns.interfaces.push(createInterface(name, detail.request.body!.properties, project, ns))
       args.push(`body: ${name}`)
     }
     if (detail.request.query?.properties?.length) {
       let queryType = `${apiType}Query`
       const keys = detail.request.query.properties.map(s => s.name)
       if (keys.includes('page_token') && keys.includes('page_size')) {
+        project.internalImports.add('Pagination')
         const properties = detail.request.query.properties.filter(s => s.name !== 'page_token' && s.name !== 'page_size')
         if (properties.length) {
-          project.internalImports.add('Pagination')
-          project.requests.push(`export interface ${queryType} extends Pagination {\n${generateParams(properties, project.imports)}}`)
+          ns.interfaces.push(createInterface(queryType, properties, project, ns, 'Pagination'))
           paginationRequest = { queryType }
         } else {
           queryType = 'Pagination'
           paginationRequest = {}
         }
       } else {
-        project.requests.push(`export interface ${queryType} {\n${generateParams(detail.request.query.properties, project.imports)}}`)
+        ns.interfaces.push(createInterface(queryType, detail.request.query.properties, project, ns))
       }
       args.push(`query?: ${queryType}`)
     }
@@ -286,43 +432,57 @@ async function start() {
           returnType = 'Promise<void>'
         } else {
           const responseType = `${apiType}Response`
-          const keys = (data.properties || []).map(v => v.name)
+          const _keys = (data.properties || []).map(v => v.name)
+          const keys = new Set(_keys)
           let pagination: [string, string, Schema] | undefined
-          if (keys.includes('has_more') && (keys.includes('page_token') || keys.includes('next_page_token')) && keys.length === 3) {
-            const list = (data.properties || []).find(v => !['has_more', 'page_token', 'next_page_token'].includes(v.name))!
+          const isPagination = keys.delete('page_token') || keys.delete('next_page_token')
+          keys.delete('has_more')
+          keys.delete('count')
+          keys.delete('total_count')
+          keys.delete('total')
+          keys.delete('page_size')
+          if (isPagination && keys.size === 1) {
+            const list = (data.properties || []).find(v => v.name === [...keys][0])!
             if (list.type === 'list') {
-              const tokenKey = keys.includes('page_token') ? 'page_token' : 'next_page_token'
+              const tokenKey = _keys.includes('page_token') ? 'page_token' : 'next_page_token'
               pagination = [list.name, tokenKey, list.items!]
             }
           }
           if (pagination) {
             const [itemsKey, tokenKey, schema] = pagination
-            let innerType = formatType(schema, project.imports)
+            let innerType = formatType(schema, apiType + 'Item', project, ns)
             if (schema.type === 'object' && schema.properties && !schema.ref) {
-              project.responses.push(`export interface ${apiType}Item ${innerType}`)
+              ns.interfaces.push(`export interface ${apiType}Item ${innerType}`)
               innerType = `${apiType}Item`
             }
-            returnType = itemsKey === 'items' ? `Paginated<${innerType}>` : `Paginated<${innerType}, '${itemsKey}'>`
+            // standard pagination response
+            if (_keys.length === 3 && _keys.includes('has_more') && _keys.includes('page_token')) {
+              returnType = itemsKey === 'items' ? `Paginated<${innerType}>` : `Paginated<${innerType}, '${itemsKey}'>`
+              project.internalImports.add('Paginated')
+            } else {
+              returnType = `Promise<${responseType}> & AsyncIterableIterator<${innerType}>`
+              ns.interfaces.push(createInterface(responseType, data.properties, project, ns))
+            }
             paginationResponse = { innerType, tokenKey, itemsKey }
           } else {
             if (detail.pagination) {
-              console.log(`unsupported pagination (${keys.join(', ')}), see https://open.feishu.cn${summary.fullPath}}`)
+              console.log(`unsupported pagination (${_keys}), see https://open.feishu.cn${summary.fullPath}`)
             }
-            project.responses.push(`export interface ${responseType} {\n${generateParams(data.properties, project.imports)}}`)
+            ns.interfaces.push(createInterface(responseType, data.properties, project, ns))
             returnType = `Promise<${responseType}>`
           }
         }
       } else {
         const responseType = `${apiType}Response`
         const properties = detail.response.body.properties!.filter(v => !['code', 'msg'].includes(v.name))
-        project.responses.push(`export interface ${responseType} extends BaseResponse {\n${generateParams(properties, project.imports)}}`)
+        ns.interfaces.push(createInterface(responseType, properties, project, ns, 'BaseResponse'))
         extras.push(`type: 'raw-json'`)
         project.internalImports.add('BaseResponse')
-        returnType = `Promise<${responseType}>`
+        returnType = `Promise<${lastPart}.${responseType}>`
       }
     }
 
-    project.methods.push(dedent`
+    ns.methods.push(dedent`
       /**
        * ${summary.name}
        * @see https://open.feishu.cn${summary.fullPath}
@@ -347,8 +507,8 @@ async function start() {
       .replace(/:([0-9a-zA-Z_]+)/g, '{$1}')
     project.defines[path] ||= {}
     project.defines[path][detail.httpMethod] = extras.length
-      ? `{ name: '${method}', ${extras.join(', ')} }`
-      : `'${method}'`
+      ? `{ name: '${route}', ${extras.join(', ')} }`
+      : `'${route}'`
   })
 
   await Promise.all(Object.entries(projects).map(async ([name, project]) => {
@@ -363,27 +523,30 @@ async function start() {
       .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
       .join(', ')} } from '../internal'`]
     if (project.imports.size) {
-      imports.unshift(`import { ${[...project.imports]
-        .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
-        .join(', ')} } from '.'`)
+      imports.unshift(`import * as Lark from '.'`)
     }
     await writeFile(path, [
       imports.join('\n'),
       dedent`
         declare module '../internal' {
           interface Internal {
-            __METHODS__
+            ${camelize(name)}: ${capitalize(camelize(name))}.Methods
           }
         }
-      `.replace('__METHODS__', project.methods.join('\n').split('\n').join('\n    ')),
-      ...project.requests,
-      ...project.responses,
-      dedent`
+
+        __NAMESPACE__
+
         Internal.define({
           __DEFINES__
-        })
-      `.replace('__DEFINES__', defines),
-    ].join('\n\n') + '\n')
+        })`
+        .replace('__NAMESPACE__', formatNamespace(capitalize(camelize(name)), project.namespace))
+        .replace('__DEFINES__', defines),
+    ].join('\n\n').split('\n')
+      .map(line => line.trimEnd())
+      .join('\n')
+      .replace(/\n{2,}( *\})/g, '\n$1')
+      .replace(/\{\n{2,}/g, '{\n')
+      .replace(/\n{2,}/g, '\n\n') + '\n')
   }))
 
   await writeFile(new URL('../src/types/index.ts', import.meta.url), [
